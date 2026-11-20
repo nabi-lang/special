@@ -1,0 +1,323 @@
+// The error function family and the normal distribution's CDF and
+// quantile.
+//
+// erf by its series sum (2x^2)^n / (2n + 1)!! below 1/2, whose terms
+// are all positive; erfc above 1/2 as e^-x^2 erfcx(x), erfcx by
+// Chebyshev series up to 8 and Laplace's continued fraction past it.
+// The square in exp(-x^2) is carried as the exact sum of two doubles
+// (one fused multiply-add), so the tails keep full relative accuracy
+// out to the underflow near 27.2 (erfc) and -38.4 (the normal CDF). The
+// normal quantile is Wichura's AS 241 (1988), accurate to about 1e-16.
+
+const SQRT_PI: f64 = 1.7724538509055160;
+const FRAC_2_SQRT_PI: f64 = 1.1283791670955126;
+const FRAC_1_SQRT2: f64 = 0.7071067811865476;
+const EPS: f64 = 2.220446049250313e-16;
+// Below this |x| erf is summed; above it erfc is e^-x^2 erfcx(x).
+const T: f64 = 0.5;
+
+// Chebyshev coefficients of erfcx(x) = e^(x^2) erfc(x) on [0.5, 1],
+// [1, 2], [2, 4] and [4, 8], from 50-digit values at 80 Chebyshev
+// nodes, cut where they fall below 1e-19.
+const R0: [f64; 15] = [
+    0.5142540300448141, -0.09353436157631646, 0.007349543567965961, -0.0005170287683170955,
+    3.327489181039832e-05, -1.9877609419315706e-06, 1.1137198399251981e-07, -5.898649609389129e-09,
+    2.9712990142852805e-10, -1.430488185776257e-11, 6.608616284265577e-13, -2.9395552899978545e-14,
+    1.2625028540389158e-15, -5.2483535009959205e-17, 2.1162858025358237e-18,
+];
+const R1: [f64; 18] = [
+    0.331427281639452, -0.0850021377067432, 0.009951127341466115, -0.0010810888102208325,
+    0.0001102324363119495, -1.0636830518218601e-05, 9.775012680479055e-07, -8.597922867888315e-08,
+    7.2677084117248425e-09, -5.923543840592542e-10, 4.6683928572294154e-11, -3.56612770156775e-12,
+    2.6458779519104523e-13, -1.9101658673527567e-14, 1.343976588479829e-15, -9.228790549094326e-17,
+    6.19267308464391e-18, -4.0652224326488762e-19,
+];
+const R2: [f64; 21] = [
+    0.1874295690262241, -0.05794652883669097, 0.008595247387396534, -0.0012284613640242594,
+    0.00016974366686180488, -2.2738329337044562e-05, 2.959844378804878e-06, -3.7513575581379714e-07,
+    4.6372828761738244e-08, -5.599455392564088e-09, 6.613160896679916e-10, -7.648271522199816e-11,
+    8.670904325876594e-12, -9.645456274382108e-13, 1.0536827959360625e-13, -1.1312630906760667e-14,
+    1.1945180669174577e-15, -1.241310752580407e-16, 1.270246323185436e-17, -1.280725873663855e-18,
+    1.2729426443953689e-19,
+];
+const R3: [f64; 23] = [
+    0.09799557556862198, -0.03261716242283879, 0.005354444513048941, -0.0008675085617618387,
+    0.0001387834577332989, -2.1933248302183236e-05, 3.425716824410705e-06, -5.289955530513349e-07,
+    8.079076527537946e-08, -1.2207511691612988e-08, 1.8255151508559988e-09, -2.7024969193563974e-10,
+    3.961752303537055e-11, -5.752619043200236e-12, 8.275752891382595e-13, -1.1798167744445412e-13,
+    1.6671816868045593e-14, -2.335628745546585e-15, 3.244620004495789e-16, -4.470390173206754e-17,
+    6.10980111227626e-18, -8.284830681274416e-19, 1.114773431757112e-19,
+];
+
+fn clenshaw<const N: usize>(c: [f64; N], lo: f64, hi: f64, x: f64) -> f64 {
+    let u = (2.0 * x - lo - hi) / (hi - lo);
+    let u2 = 2.0 * u;
+    let (b1, b2) = (0.0, 0.0);
+    let k = N - 1;
+    while k > 0 {
+        let t = u2 * b1 - b2 + c[k];
+        b2 = b1;
+        b1 = t;
+        k -= 1;
+    }
+    u * b1 - b2 + c[0]
+}
+
+/// erfc(z) for z >= T with z^2 = h + l.
+fn erfc_pos(z: f64, h: f64, l: f64) -> f64 {
+    if z >= 8.0 { return erfc_cf(z, h, l); }
+    let r = if z < 1.0 {
+        clenshaw(R0, 0.5, 1.0, z)
+    } else if z < 2.0 {
+        clenshaw(R1, 1.0, 2.0, z)
+    } else if z < 4.0 {
+        clenshaw(R2, 2.0, 4.0, z)
+    } else {
+        clenshaw(R3, 4.0, 8.0, z)
+    };
+    exp_neg(h, l) * r
+}
+
+/// `exp(-(h + l))` for the exact square `h + l`.
+fn exp_neg(h: f64, l: f64) -> f64 { (-h).exp() * (1.0 - l) }
+
+/// erf(z) for 0 <= z < T, with z^2 = h + l.
+fn erf_series(z: f64, h: f64, l: f64) -> f64 {
+    let s2 = 2.0 * h;
+    let term = 1.0;
+    let s = 1.0;
+    let k = 1.0;
+    while k < 200.0 {
+        term *= s2 / (2.0 * k + 1.0);
+        s += term;
+        if term <= EPS * 0.5 * s { break; }
+        k += 1.0;
+    }
+    FRAC_2_SQRT_PI * z * exp_neg(h, l) * s
+}
+
+/// erfc(z) for z >= 8 with z^2 = h + l: e^-z^2 / sqrt(pi) times Laplace's
+/// continued fraction 1 / (z + (1/2) / (z + 1 / (z + (3/2) / (z + ...))))
+/// (DLMF 7.9.2), summed bottom up from 14 levels, which leave it 1e-20
+/// from its limit at z = 8.
+fn erfc_cf(z: f64, h: f64, l: f64) -> f64 {
+    if h > 745.2 { return 0.0; }
+    let t = z;
+    let k = 14.0;
+    while k > 0.0 {
+        t = z + 0.5 * k / t;
+        k -= 1.0;
+    }
+    exp_neg(h, l) / (SQRT_PI * t)
+}
+
+fn square(x: f64) -> (f64, f64) {
+    let h = x * x;
+    (h, x.mul_add(x, -h))
+}
+
+/// The error function `erf(x) = 2 / sqrt(pi) * integral_0^x e^-t^2 dt`.
+/// About 2 ulp everywhere. Python: `math.erf`.
+///
+/// ```nabi
+/// use special::erf;
+///
+/// assert(erf(0.0) == 0.0);
+/// assert((erf(0.5) - 0.5204998778130465).abs() < 1e-16);
+/// assert(erf(-1.0) == -erf(1.0));
+/// ```
+pub fn erf(x: f64) -> f64 {
+    if x != x { return x; }
+    let z = x.abs();
+    let r = if z < T {
+        let (h, l) = square(z);
+        erf_series(z, h, l)
+    } else {
+        let (h, l) = square(z);
+        1.0 - erfc_pos(z, h, l)
+    };
+    if x < 0.0 { -r } else { r }
+}
+
+/// The complementary error function `erfc(x) = 1 - erf(x)`, with full
+/// relative accuracy in the upper tail (about 2 ulp; subnormal past 26.6, 0 past 27.3).
+/// Python: `math.erfc`.
+///
+/// ```nabi
+/// use special::erfc;
+///
+/// assert((erfc(1.0) - 0.15729920705028513).abs() < 3e-17);
+/// assert(((erfc(10.0) - 2.088487583762545e-45) / 2.088487583762545e-45).abs() < 1e-14);
+/// ```
+pub fn erfc(x: f64) -> f64 {
+    if x != x { return x; }
+    let z = x.abs();
+    let (h, l) = square(z);
+    if x < T {
+        if x > -T { return 1.0 - erf_series(x.abs(), h, l) * x.signum(); }
+        return 2.0 - erfc_pos(z, h, l);
+    }
+    erfc_pos(z, h, l)
+}
+
+/// The standard normal CDF `Phi(x)`, with full relative accuracy in
+/// both tails (0 below -38.5). SciPy: `special.ndtr`.
+///
+/// ```nabi
+/// use special::ndtr;
+///
+/// assert(ndtr(0.0) == 0.5);
+/// assert((ndtr(1.96) - 0.9750021048517795).abs() < 1e-16);
+/// assert(((ndtr(-10.0) - 7.619853024160527e-24) / 7.619853024160527e-24).abs() < 1e-14);
+/// ```
+pub fn ndtr(x: f64) -> f64 {
+    if x != x { return x; }
+    let z = x.abs() * FRAC_1_SQRT2;
+    if z < T {
+        let (h, l) = square(x);
+        let e = erf_series(z, h * 0.5, l * 0.5);
+        return if x < 0.0 { 0.5 - 0.5 * e } else { 0.5 + 0.5 * e };
+    }
+    let (h, l) = square(x);
+    let t = 0.5 * erfc_pos(z, h * 0.5, l * 0.5);
+    if x < 0.0 { t } else { 1.0 - t }
+}
+
+// Wichura (1988), AS 241 PPND16: rational approximations in
+// r = 0.180625 - q^2 near the center and in sqrt(-ln p) - 1.6 and
+// sqrt(-ln p) - 5 in the tails.
+const CN: [f64; 8] = [
+    3.387132872796366608, 133.14166789178437745, 1971.5909503065514427, 13731.693765509461125,
+    45921.953931549871457, 67265.770927008700853, 33430.575583588128105, 2509.0809287301226727,
+];
+const CD: [f64; 8] = [
+    1.0, 42.313330701600911252, 687.1870074920579083, 5394.1960214247511077,
+    21213.794301586595867, 39307.89580009271061, 28729.085735721942674, 5226.495278852545925,
+];
+const TN: [f64; 8] = [
+    1.42343711074968357734, 4.6303378461565452959, 5.7694972214606914055, 3.64784832476320460504,
+    1.27045825245236838258, 0.24178072517745061177, 0.0227238449892691845833, 7.7454501427834140764e-4,
+];
+const TD: [f64; 8] = [
+    1.0, 2.05319162663775882187, 1.6763848301838038494, 0.68976733498510000455,
+    0.14810397642748007459, 0.0151986665636164571966, 5.475938084995344946e-4, 1.05075007164441684324e-9,
+];
+const FN: [f64; 8] = [
+    6.6579046435011037772, 5.4637849111641143699, 1.7848265399172913358, 0.29656057182850489123,
+    0.026532189526576123093, 0.0012426609473880784386, 2.71155556874348757815e-5, 2.01033439929228813265e-7,
+];
+const FD: [f64; 8] = [
+    1.0, 0.59983220655588793769, 0.13692988092273580531, 0.0148753612908506148525,
+    7.868691311456132591e-4, 1.8463183175100546818e-5, 1.4215117583164458887e-7, 2.04426310338993978564e-15,
+];
+
+fn ratio(n: [f64; 8], d: [f64; 8], r: f64) -> f64 {
+    let p = n[7];
+    let q = d[7];
+    let k = 7usize;
+    while k > 0 {
+        k -= 1;
+        p = p * r + n[k];
+        q = q * r + d[k];
+    }
+    p / q
+}
+
+/// The standard normal quantile `Phi^-1(p)`, `0 <= p <= 1` (NaN
+/// otherwise): Wichura's AS 241, about 1e-16 relative. `-inf` / `inf`
+/// at 0 / 1. SciPy: `special.ndtri`.
+///
+/// ```nabi
+/// use special::ndtri;
+///
+/// assert(ndtri(0.5) == 0.0);
+/// assert((ndtri(0.975) - 1.959963984540054).abs() < 1e-15);
+/// ```
+pub fn ndtri(p: f64) -> f64 { qnorm(p, 1.0 - p) }
+
+/// The normal quantile from both `p` and `q = 1 - p`, so an upper-tail
+/// probability below 1e-16 keeps its precision (`ndtri(1 - 1e-20)` is
+/// `inf`; `ndtri_pq(1.0, 1e-20)` is 9.26...).
+///
+/// ```nabi
+/// assert((special::ndtri_pq(1.0, 1e-20) - 9.262340089798408).abs() < 1e-14);
+/// ```
+pub fn ndtri_pq(p: f64, q: f64) -> f64 { qnorm(p, q) }
+
+pub(pkg) fn qnorm(p: f64, q: f64) -> f64 {
+    if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+    if p == 0.0 { return f64::NEG_INFINITY; }
+    if q == 0.0 { return f64::INFINITY; }
+    let c = p - 0.5;
+    if c.abs() <= 0.425 {
+        let r = 0.180625 - c * c;
+        return c * ratio(CN, CD, r);
+    }
+    let r = if p < q { p } else { q };
+    r = (-r.ln()).sqrt();
+    let v = if r <= 5.0 { ratio(TN, TD, r - 1.6) } else { ratio(FN, FD, r - 5.0) };
+    if p < q { -v } else { v }
+}
+
+/// The inverse error function: `erf(erfinv(y)) = y` for `-1 < y < 1`;
+/// `+-inf` at `+-1`, NaN outside. From the normal quantile, refined by
+/// one or two Halley steps on `erf`; about 2 ulp.
+///
+/// ```nabi
+/// use special::{erf, erfinv};
+///
+/// assert(erfinv(0.0) == 0.0);
+/// assert((erf(erfinv(0.3)) - 0.3).abs() < 1e-16);
+/// ```
+pub fn erfinv(y: f64) -> f64 {
+    if !(y >= -1.0 && y <= 1.0) { return f64::NAN; }
+    if y == 0.0 { return y; }
+    let a = y.abs();
+    if a > 0.5 {
+        let x = erfcinv(1.0 - a);
+        return if y < 0.0 { -x } else { x };
+    }
+    let x = qnorm(0.5 + 0.5 * a, 0.5 - 0.5 * a) * FRAC_1_SQRT2;
+    for _ in 0..3 {
+        let f = erf(x) - a;
+        let u = f / (FRAC_2_SQRT_PI * (-x * x).exp());
+        let nx = x - u / (1.0 + x * u);
+        if (nx - x).abs() <= EPS * nx.abs() {
+            x = nx;
+            break;
+        }
+        x = nx;
+    }
+    if y < 0.0 { -x } else { x }
+}
+
+/// The inverse complementary error function: `erfc(erfcinv(q)) = q` for
+/// `0 < q < 2`, accurate for tiny `q`.
+///
+/// ```nabi
+/// use special::{erfc, erfcinv};
+///
+/// let x = erfcinv(1e-100);
+/// // erfc changes by 2x = 30 relative per unit of x, so one ulp of x
+/// // is 5e-14 here.
+/// assert(((erfc(x) - 1e-100) / 1e-100).abs() < 1e-13);
+/// ```
+pub fn erfcinv(q: f64) -> f64 {
+    if !(q >= 0.0 && q <= 2.0) { return f64::NAN; }
+    if q == 0.0 { return f64::INFINITY; }
+    if q == 2.0 { return f64::NEG_INFINITY; }
+    if q > 1.0 { return -erfcinv(2.0 - q); }
+    let x = -qnorm(0.5 * q, 1.0 - 0.5 * q) * FRAC_1_SQRT2;
+    for _ in 0..3 {
+        let f = erfc(x) - q;
+        let u = -f / (FRAC_2_SQRT_PI * (-x * x).exp());
+        if !u.is_finite() { break; }
+        let nx = x - u / (1.0 + x * u);
+        if (nx - x).abs() <= EPS * nx.abs() {
+            x = nx;
+            break;
+        }
+        x = nx;
+    }
+    x
+}

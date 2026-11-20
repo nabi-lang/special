@@ -1,0 +1,213 @@
+// The classical orthogonal polynomials of integer degree n, each by its
+// three-term recurrence (DLMF 18.9.1), O(n): forward recurrence is
+// stable for these on and off their interval of orthogonality, with an
+// error of a few ulp per step. Chebyshev polynomials of degree above 20
+// use the closed forms cos(n acos x) and cosh(n acosh x) instead.
+// Overflow gives +-inf, as the value does.
+
+/// The Legendre polynomial `P_n(x)`, any real `x`. `(k + 1) P_(k+1) =
+/// (2k + 1) x P_k - k P_(k-1)`; within about `n` ulp of mpmath on the
+/// tests on [-1, 1]. SciPy: `eval_legendre`.
+///
+/// ```nabi
+/// // P_2(x) = (3 x^2 - 1) / 2.
+/// assert(special::eval_legendre(2, 0.5) == -0.125);
+/// assert(special::eval_legendre(7, 1.0) == 1.0);
+/// ```
+pub fn eval_legendre(n: u32, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let (p0, p1) = (1.0, x);
+    for k in 1..n {
+        let kf = k as f64;
+        let p2 = ((2.0 * kf + 1.0) * x * p1 - kf * p0) / (kf + 1.0);
+        p0 = p1;
+        p1 = p2;
+        if p1.is_infinite() { return p1; }
+    }
+    p1
+}
+
+/// The Chebyshev polynomial of the first kind `T_n(x)`, any real `x`:
+/// the recurrence `T_(k+1) = 2x T_k - T_(k-1)` up to degree 20, `cos(n
+/// acos x)` on [-1, 1] and `+-cosh(n acosh |x|)` outside past it.
+/// Within about 4 ulp of mpmath at small degree, `n` ulp in absolute
+/// error at large. SciPy: `eval_chebyt`.
+///
+/// ```nabi
+/// assert(special::eval_chebyt(3, 0.5) == -1.0);
+/// assert((special::eval_chebyt(100, 0.3) - (100.0 * 0.3f64.acos()).cos()).abs() < 1e-15);
+/// ```
+pub fn eval_chebyt(n: u32, x: f64) -> f64 {
+    if x != x { return x; }
+    if n == 0 { return 1.0; }
+    if n > 20 {
+        let nf = n as f64;
+        if x.abs() <= 1.0 { return (nf * x.acos()).cos(); }
+        let v = (nf * x.abs().acosh()).cosh();
+        return if x < 0.0 && n % 2 == 1 { -v } else { v };
+    }
+    let (t0, t1) = (1.0, x);
+    for _ in 1..n {
+        let t2 = 2.0 * x * t1 - t0;
+        t0 = t1;
+        t1 = t2;
+        if t1.is_infinite() { return t1; }
+    }
+    t1
+}
+
+/// The Chebyshev polynomial of the second kind `U_n(x)`, any real `x`:
+/// the recurrence up to degree 20, `sin((n + 1) t) / sin t` with `x =
+/// cos t` on (-1, 1) past it (and `(n + 1) (+-1)^n` at the ends), the
+/// hyperbolic form outside. SciPy: `eval_chebyu`.
+///
+/// ```nabi
+/// // U_2(x) = 4 x^2 - 1.
+/// assert(special::eval_chebyu(2, 0.5) == 0.0);
+/// assert(special::eval_chebyu(50, 1.0) == 51.0);
+/// ```
+pub fn eval_chebyu(n: u32, x: f64) -> f64 {
+    if x != x { return x; }
+    if n == 0 { return 1.0; }
+    let nf = n as f64;
+    if x.abs() == 1.0 { return if x < 0.0 && n % 2 == 1 { -(nf + 1.0) } else { nf + 1.0 }; }
+    if n > 20 {
+        if x.abs() < 1.0 {
+            let t = x.acos();
+            return ((nf + 1.0) * t).sin() / t.sin();
+        }
+        let t = x.abs().acosh();
+        let v = ((nf + 1.0) * t).sinh() / t.sinh();
+        return if x < 0.0 && n % 2 == 1 { -v } else { v };
+    }
+    let (u0, u1) = (1.0, 2.0 * x);
+    for _ in 1..n {
+        let u2 = 2.0 * x * u1 - u0;
+        u0 = u1;
+        u1 = u2;
+        if u1.is_infinite() { return u1; }
+    }
+    u1
+}
+
+/// The physicists' Hermite polynomial `H_n(x)` (weight `e^-x^2`):
+/// `H_(k+1) = 2x H_k - 2k H_(k-1)`. Within about `n` ulp of mpmath on
+/// the tests. SciPy: `eval_hermite`.
+///
+/// ```nabi
+/// // H_3(x) = 8 x^3 - 12 x.
+/// assert(special::eval_hermite(3, 2.0) == 40.0);
+/// ```
+pub fn eval_hermite(n: u32, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let (h0, h1) = (1.0, 2.0 * x);
+    for k in 1..n {
+        let h2 = 2.0 * x * h1 - 2.0 * k as f64 * h0;
+        h0 = h1;
+        h1 = h2;
+        if h1.is_infinite() { return h1; }
+    }
+    h1
+}
+
+/// The probabilists' Hermite polynomial `He_n(x)` (weight `e^(-x^2 /
+/// 2)`): `He_(k+1) = x He_k - k He_(k-1)`. SciPy: `eval_hermitenorm`.
+///
+/// ```nabi
+/// // He_3(x) = x^3 - 3 x.
+/// assert(special::eval_hermitenorm(3, 2.0) == 2.0);
+/// ```
+pub fn eval_hermitenorm(n: u32, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let (h0, h1) = (1.0, x);
+    for k in 1..n {
+        let h2 = x * h1 - k as f64 * h0;
+        h0 = h1;
+        h1 = h2;
+        if h1.is_infinite() { return h1; }
+    }
+    h1
+}
+
+/// The generalized Laguerre polynomial `L_n^(alpha)(x)`: `(k + 1)
+/// L_(k+1) = (2k + 1 + alpha - x) L_k - (k + alpha) L_(k-1)`. Any real
+/// `alpha` and `x`; within about `n` ulp of mpmath on the tests away
+/// from the zeros. SciPy: `eval_genlaguerre`.
+///
+/// ```nabi
+/// // L_1^(a)(x) = 1 + a - x.
+/// assert(special::eval_genlaguerre(1, 0.5, 2.0) == -0.5);
+/// ```
+pub fn eval_genlaguerre(n: u32, alpha: f64, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let (l0, l1) = (1.0, 1.0 + alpha - x);
+    for k in 1..n {
+        let kf = k as f64;
+        let l2 = ((2.0 * kf + 1.0 + alpha - x) * l1 - (kf + alpha) * l0) / (kf + 1.0);
+        l0 = l1;
+        l1 = l2;
+        if l1.is_infinite() { return l1; }
+    }
+    l1
+}
+
+/// The Laguerre polynomial `L_n(x) = L_n^(0)(x)`. SciPy:
+/// `eval_laguerre`.
+///
+/// ```nabi
+/// // L_2(x) = (x^2 - 4x + 2) / 2.
+/// assert(special::eval_laguerre(2, 1.0) == -0.5);
+/// ```
+pub fn eval_laguerre(n: u32, x: f64) -> f64 { eval_genlaguerre(n, 0.0, x) }
+
+/// The Gegenbauer (ultraspherical) polynomial `C_n^(alpha)(x)`: `(k +
+/// 1) C_(k+1) = 2 (k + alpha) x C_k - (k + 2 alpha - 1) C_(k-1)`, `C_1 =
+/// 2 alpha x`; identically 0 for `n >= 1` at `alpha = 0`, as the
+/// standard normalization gives (use `eval_chebyt` for its limit). Any
+/// real `alpha` and `x`. SciPy: `eval_gegenbauer`.
+///
+/// ```nabi
+/// // C_n^(1/2) = P_n, C_n^(1) = U_n.
+/// assert((special::eval_gegenbauer(4, 0.5, 0.3) - special::eval_legendre(4, 0.3)).abs() < 4e-16);
+/// assert((special::eval_gegenbauer(5, 1.0, 0.3) - special::eval_chebyu(5, 0.3)).abs() < 4e-16);
+/// ```
+pub fn eval_gegenbauer(n: u32, alpha: f64, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let (c0, c1) = (1.0, 2.0 * alpha * x);
+    for k in 1..n {
+        let kf = k as f64;
+        let c2 = (2.0 * (kf + alpha) * x * c1 - (kf + 2.0 * alpha - 1.0) * c0) / (kf + 1.0);
+        c0 = c1;
+        c1 = c2;
+        if c1.is_infinite() { return c1; }
+    }
+    c1
+}
+
+/// The Jacobi polynomial `P_n^(alpha, beta)(x)` by the recurrence of
+/// DLMF 18.9.2, any real parameters and `x` (NaN where the recurrence
+/// divides by zero, `alpha + beta` a negative integer at least `-2n`).
+/// Within about `n` ulp of mpmath on the tests. SciPy: `eval_jacobi`.
+///
+/// ```nabi
+/// // P_1^(a, b)(x) = (a + 1) + (a + b + 2) (x - 1) / 2.
+/// assert(special::eval_jacobi(1, 1.0, 2.0, 0.5) == 0.75);
+/// assert((special::eval_jacobi(6, 0.0, 0.0, 0.4) - special::eval_legendre(6, 0.4)).abs() < 4e-16);
+/// ```
+pub fn eval_jacobi(n: u32, alpha: f64, beta: f64, x: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let ab = alpha + beta;
+    let (p0, p1) = (1.0, (alpha + 1.0) + (ab + 2.0) * (x - 1.0) * 0.5);
+    for k in 2..n + 1 {
+        let kf = k as f64;
+        let c = 2.0 * kf + ab;
+        let a1 = 2.0 * kf * (kf + ab) * (c - 2.0);
+        let a2 = (c - 1.0) * (c * (c - 2.0) * x + alpha * alpha - beta * beta);
+        let a3 = 2.0 * (kf + alpha - 1.0) * (kf + beta - 1.0) * c;
+        let p2 = (a2 * p1 - a3 * p0) / a1;
+        p0 = p1;
+        p1 = p2;
+        if p1.is_infinite() { return p1; }
+    }
+    p1
+}

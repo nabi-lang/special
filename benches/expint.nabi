@@ -1,0 +1,93 @@
+// The exponential, trigonometric and Fresnel integrals and Lambert W
+// at 1000 points per call; ns/item is one value.
+
+use core::bench::Bench;
+use core::hint::black_box;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 1000;
+
+/// `N` uniform points in [lo, hi) from a fixed seed.
+fn points(lo: f64, hi: f64) -> List<f64> {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.uniform(lo, hi)); }
+    xs
+}
+
+#[bench]
+fn e1(b: Bench) {
+    let x = points(0.01, 50.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::e1(v); }
+        s
+    });
+}
+
+#[bench]
+fn ei(b: Bench) {
+    let x = points(0.01, 50.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::ei(v); }
+        s
+    });
+}
+
+#[bench]
+fn expn5(b: Bench) {
+    let x = points(0.01, 50.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::expn(5, v); }
+        s
+    });
+}
+
+#[bench]
+fn sici(b: Bench) {
+    let x = points(0.01, 50.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::sici(v).1; }
+        s
+    });
+}
+
+#[bench]
+fn fresnel(b: Bench) {
+    let x = points(0.0, 10.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::fresnel(v).0; }
+        s
+    });
+}
+
+#[bench]
+fn lambertw(b: Bench) {
+    let x = points(-0.3, 100.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::lambertw(v); }
+        s
+    });
+}
+
+#[bench]
+fn lambertw_m1(b: Bench) {
+    let x = points(-0.36, -0.001);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::lambertw(v, -1); }
+        s
+    });
+}

@@ -1,0 +1,99 @@
+// The gamma, beta and error families and the logistic helpers over
+// 100000 arguments each, so items/s reads as calls per second.
+
+use core::array::{Array, Vector};
+use core::bench::Bench;
+use core::hint::black_box;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 100000;
+
+fn args(lo: f64, hi: f64) -> List<f64> {
+    let g = Xoshiro256PlusPlus::seed(7);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.uniform(lo, hi)); }
+    xs
+}
+
+fn each(b: Bench, xs: List<f64>, f: fn(f64) -> f64) {
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for x in black_box(xs) { s += f(x); }
+        s
+    });
+}
+
+#[bench]
+fn gamma(b: Bench) { each(b, args(0.1, 30.0), pkg::gamma); }
+
+#[bench]
+fn lgamma(b: Bench) { each(b, args(0.1, 1000.0), pkg::lgamma); }
+
+#[bench]
+fn digamma(b: Bench) { each(b, args(0.1, 30.0), pkg::digamma); }
+
+#[bench]
+fn erf(b: Bench) { each(b, args(-4.0, 4.0), pkg::erf); }
+
+#[bench]
+fn erfc(b: Bench) { each(b, args(0.0, 20.0), pkg::erfc); }
+
+#[bench]
+fn ndtri(b: Bench) { each(b, args(0.0, 1.0), pkg::ndtri); }
+
+#[bench]
+fn gammainc(b: Bench) {
+    let xs = args(0.0, 20.0);
+    each(b, xs, |x: f64| -> f64 { pkg::gammainc(4.5, x) });
+}
+
+#[bench]
+fn betainc(b: Bench) {
+    let xs = args(0.0, 1.0);
+    each(b, xs, |x: f64| -> f64 { pkg::betainc(2.5, 7.0, x) });
+}
+
+#[bench]
+fn expit(b: Bench) { each(b, args(-30.0, 30.0), pkg::expit); }
+
+#[bench]
+fn gamma_broadcast(b: Bench) {
+    let x: Vector<f64> = Array::from_list(args(0.1, 30.0), [N]);
+    b.set_items(N as i64);
+    b.iter(|| pkg::gamma.(black_box(x)));
+}
+
+#[bench]
+fn logsumexp(b: Bench) {
+    let x: Vector<f64> = Array::from_list(args(-50.0, 50.0), [N]);
+    b.set_items(N as i64);
+    b.iter(|| pkg::logsumexp(black_box(x)));
+}
+
+#[bench]
+fn softmax_rows(b: Bench) {
+    let x = Array::from_list(args(-50.0, 50.0), [1000, 100]);
+    b.set_items(N as i64);
+    b.iter(|| try! pkg::softmax(black_box(x)));
+}
+
+#[bench]
+fn comb_exact_1000_500(b: Bench) {
+    b.iter(|| pkg::comb_exact(black_box(1000u64), 500u64));
+}
+
+#[bench]
+fn factorial_exact_10000(b: Bench) {
+    b.iter(|| pkg::factorial_exact(black_box(10000u64)));
+}
+
+#[bench]
+fn gamma_apply_1e6(b: Bench) {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let xs: List<f64> = List::with_capacity(1000000);
+    for _ in 0..1000000 { xs.push(g.uniform(0.1, 30.0)); }
+    let x: Vector<f64> = Array::from_list(xs, [1000000]);
+    b.set_items(1000000);
+    b.iter(|| pkg::apply(pkg::gamma, black_box(x)));
+}

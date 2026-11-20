@@ -1,0 +1,290 @@
+// Associated Legendre functions and spherical harmonics. Integer
+// degrees run the three-term recurrence upward in the degree from
+// P_m^m, which is stable for |x| <= 1 (P_l^m is the dominant solution);
+// values are carried as a mantissa and a power of 2^256 so that
+// (2m - 1)!! and (1 - x^2)^(m/2) neither overflow nor underflow on the
+// way. Real degrees below 2 sum the hypergeometric series of DLMF
+// 14.3.1 in (1 - x) / 2 or of 14.3.11 in x^2; higher ones recur upward
+// in the degree from there, since those series cancel badly once the
+// degree is large. All with the Condon-Shortley
+// phase (-1)^m, as SciPy and mpmath.
+
+use pkg::gammas::{gamma, lgamma};
+use core::num::Complex;
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+// 2^256 and its inverse: exact scale factors.
+const BIG: f64 = 1.157920892373162e77;
+const SMALL: f64 = 8.636168555094445e-78;
+
+/// `v * BIG^e`.
+fn scaled(v: f64, e: i32) -> f64 {
+    let r = v;
+    let k = e;
+    while k > 0 && r.is_finite() && r != 0.0 {
+        r *= BIG;
+        k -= 1;
+    }
+    while k < 0 && r != 0.0 {
+        r *= SMALL;
+        k += 1;
+    }
+    r
+}
+
+/// `1 / Gamma(x)`, 0 at the poles.
+fn rgamma(x: f64) -> f64 {
+    if x <= 0.0 && x == x.floor() { return 0.0; }
+    let g = gamma(x);
+    if g.is_infinite() { return (-lgamma(x)).exp(); }
+    1.0 / g
+}
+
+/// `P_n^m(x)` for `0 <= m <= n`, `|x| <= 1`, as `(mantissa, exponent)`.
+fn plm(n: u32, m: u32, x: f64) -> (f64, i32) {
+    let s = ((1.0 - x) * (1.0 + x)).sqrt();
+    // P_m^m = (-1)^m (2m - 1)!! s^m.
+    let p = 1.0;
+    let e = 0;
+    for k in 1..m + 1 {
+        p *= -((2 * k - 1) as f64) * s;
+        if p.abs() > BIG {
+            p *= SMALL;
+            e += 1;
+        } else if p != 0.0 && p.abs() < SMALL {
+            p *= BIG;
+            e -= 1;
+        }
+    }
+    if n == m { return (p, e); }
+    // (l - m) P_l = (2l - 1) x P_(l-1) - (l + m - 1) P_(l-2).
+    let mf = m as f64;
+    let p0 = p;
+    let p1 = x * (2.0 * mf + 1.0) * p;
+    let l = m + 2;
+    while l <= n {
+        let lf = l as f64;
+        let p2 = ((2.0 * lf - 1.0) * x * p1 - (lf + mf - 1.0) * p0) / (lf - mf);
+        p0 = p1;
+        p1 = p2;
+        if p1.abs() > BIG {
+            p0 *= SMALL;
+            p1 *= SMALL;
+            e += 1;
+        }
+        l += 1;
+    }
+    (p1, e)
+}
+
+/// `(n - m)! / (n + m)!` for `0 <= m <= n`.
+fn fact_ratio(n: u32, m: u32) -> f64 {
+    if m <= 20 {
+        let r = 1.0;
+        for k in n - m + 1..n + m + 1 { r /= k as f64; }
+        return r;
+    }
+    (lgamma((n - m + 1) as f64) - lgamma((n + m + 1) as f64)).exp()
+}
+
+/// The associated Legendre function `P_n^m(x)` of integer degree `n`
+/// and order `m`, with the Condon-Shortley phase: `P_n^m(x) = (-1)^m (1 -
+/// x^2)^(m/2) d^m P_n(x) / dx^m` for `m >= 0` and `P_n^-m = (-1)^m (n -
+/// m)! / (n + m)! P_n^m`. 0 for `|m| > n`, NaN for `|x| > 1`. The upward
+/// recurrence in `n` from `P_m^m`, rescaled so no intermediate
+/// overflows: within about `4 n` ulp of mpmath on the tests (the
+/// recurrence's rounding), up to `n = 1000`. SciPy: `assoc_legendre_p`
+/// (and `lpmv` for integer degree).
+///
+/// ```nabi
+/// // P_2^1(x) = -3 x sqrt(1 - x^2).
+/// let x = 0.6;
+/// assert((special::assoc_legendre_p(2, 1, x) + 3.0 * x * 0.8).abs() < 1e-15);
+/// assert(special::assoc_legendre_p(3, 0, 1.0) == 1.0);
+/// assert(special::assoc_legendre_p(2, 3, 0.5) == 0.0);
+/// ```
+pub fn assoc_legendre_p(n: u32, m: i32, x: f64) -> f64 {
+    if x != x || x.abs() > 1.0 { return f64::NAN; }
+    let am = m.unsigned_abs();
+    if am > n { return 0.0; }
+    let (p, e) = plm(n, am, x);
+    if m >= 0 { return scaled(p, e); }
+    let r = scaled(p * fact_ratio(n, am), e);
+    if am % 2 == 1 { -r } else { r }
+}
+
+/// `F(a, b; c; z)` by its series, for `|z| < 1`.
+fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> f64 {
+    let s = 1.0;
+    let t = 1.0;
+    let k = 0.0;
+    while k < 1e6 {
+        t *= (a + k) * (b + k) / ((c + k) * (k + 1.0)) * z;
+        s += t;
+        if t == 0.0 || (t.abs() <= EPS * 0.5 * s.abs() && k > 2.0) { break; }
+        k += 1.0;
+    }
+    s
+}
+
+/// `(v - m + 1)(v - m + 2) ... (v + m)`.
+fn rise(v: f64, m: f64) -> f64 {
+    let r = 1.0;
+    let j = 1.0 - m;
+    while j <= m {
+        r *= v + j;
+        j += 1.0;
+    }
+    r
+}
+
+/// The associated Legendre function `P_v^m(x)` (Ferrers' function on
+/// the cut, with the Condon-Shortley phase) of integer order `m` and
+/// real degree `v`, `-1 <= x <= 1` (NaN outside). An integer `v` goes to
+/// `assoc_legendre_p` (with `P_-v-1 = P_v`); otherwise for `x > -0.3` the
+/// series of DLMF 14.3.1 in `(1 - x) / 2`, else that of 14.3.11 in
+/// `x^2` for degrees below 2, the recurrence in the degree from there,
+/// and `P_v^-m = (-1)^m Gamma(v - m + 1) / Gamma(v + m + 1) P_v^m`.
+/// Within 3e-14 relative of mpmath on the tests away from the zeros;
+/// the series converge slowly as `x` nears -1, where `P_v^m` is singular
+/// (NaN at -1). SciPy: `lpmv`.
+///
+/// ```nabi
+/// assert((special::lpmv(0, 0.5, 0.3) - 0.7009385309696551).abs() < 1e-15);
+/// assert(special::lpmv(1, 2.0, 0.6) == special::assoc_legendre_p(2, 1, 0.6));
+/// ```
+pub fn lpmv(m: i32, v: f64, x: f64) -> f64 {
+    if x != x || v != v || x.abs() > 1.0 { return f64::NAN; }
+    let nu = if v < -0.5 { -v - 1.0 } else { v };
+    if nu == nu.floor() && nu < 4294967295.0 { return assoc_legendre_p(nu as u32, m, x); }
+    if x == -1.0 { return f64::NAN; }
+    let am = m.unsigned_abs();
+    let mf = am as f64;
+    let p = 0.0;
+    if nu <= 2.0 {
+        p = ferrers(mf, nu, x);
+    } else {
+        // The series cancel for a large degree; recur upward in the degree
+        // from v0 and v0 + 1 in [0, 2): (v - m + 1) P_(v+1) = (2v + 1) x
+        // P_v - (v + m) P_(v-1), stable on the cut.
+        let v = nu - nu.floor();
+        let p0 = ferrers(mf, v, x);
+        let p1 = ferrers(mf, v + 1.0, x);
+        v += 1.0;
+        while v < nu - 0.5 {
+            let p2 = ((2.0 * v + 1.0) * x * p1 - (v + mf) * p0) / (v - mf + 1.0);
+            p0 = p1;
+            p1 = p2;
+            v += 1.0;
+        }
+        p = p1;
+    }
+    if m >= 0 { return p; }
+    // Gamma(v - m + 1) / Gamma(v + m + 1) = 1 / (v - m + 1)_(2m).
+    let q = p / rise(nu, mf);
+    if am % 2 == 1 { -q } else { q }
+}
+
+/// `P_v^m(x)` for `m >= 0`, a small non-integer degree and `-1 < x < 1`,
+/// by the hypergeometric series.
+fn ferrers(mf: f64, nu: f64, x: f64) -> f64 {
+    if x > -0.3 {
+        // (-1)^m (v - m + 1)_(2m) / (2^m m!) (1 - x^2)^(m/2) F(m - v, m + v
+        // + 1; m + 1; (1 - x) / 2).
+        let r = rise(nu, mf);
+        let k = 1.0;
+        while k <= mf {
+            r /= 2.0 * k;
+            k += 1.0;
+        }
+        let s = ((1.0 - x) * (1.0 + x)).pow(0.5 * mf);
+        let p = r * s * hyp2f1(mf - nu, mf + nu + 1.0, mf + 1.0, 0.5 * (1.0 - x));
+        return if mf % 2.0 == 1.0 { -p } else { p };
+    }
+    let h = 0.5 * nu;
+    let g = 0.5 * mf;
+    let z = x * x;
+    let t1 = hyp2f1(-h - g, 0.5 + h - g, 0.5, z) * rgamma(0.5 - h - g) * rgamma(1.0 + h - g);
+    let t2 = 2.0 * x * hyp2f1(0.5 - h - g, 1.0 + h - g, 1.5, z) * rgamma(-h - g) * rgamma(0.5 + h - g);
+    2f64.pow(mf) * PI.sqrt() * ((1.0 - x) * (1.0 + x)).pow(-0.5 * mf) * (t1 - t2)
+}
+
+/// The spherical-harmonic-normalized `P_n^m(cos theta)` as `(mantissa,
+/// exponent)`, `0 <= m <= n`.
+fn sph_plm(n: u32, m: u32, theta: f64) -> (f64, i32) {
+    let s = theta.sin();
+    let c = theta.cos();
+    let p = 0.28209479177387814;
+    let e = 0;
+    for k in 1..m + 1 {
+        let kf = k as f64;
+        p *= -((2.0 * kf + 1.0) / (2.0 * kf)).sqrt() * s;
+        if p != 0.0 && p.abs() < SMALL {
+            p *= BIG;
+            e -= 1;
+        }
+    }
+    if n == m { return (p, e); }
+    let mf = m as f64;
+    let ap = (2.0 * mf + 3.0).sqrt();
+    let p0 = p;
+    let p1 = ap * c * p;
+    let l = m + 2;
+    while l <= n {
+        let lf = l as f64;
+        let a = ((4.0 * lf * lf - 1.0) / (lf * lf - mf * mf)).sqrt();
+        let p2 = a * (c * p1 - p0 / ap);
+        p0 = p1;
+        p1 = p2;
+        ap = a;
+        if p1.abs() > BIG {
+            p0 *= SMALL;
+            p1 *= SMALL;
+            e += 1;
+        }
+        l += 1;
+    }
+    (p1, e)
+}
+
+/// The normalized associated Legendre function `sqrt((2n + 1) / (4 pi)
+/// (n - m)! / (n + m)!) P_n^m(cos theta)`, the theta part of `sph_harm`
+/// (Condon-Shortley phase; `(-1)^m` times the `|m|` value for `m < 0`; 0
+/// for `|m| > n`). By the normalized recurrence, carried with a power
+/// of 2^256 so a high degree at any angle neither overflows nor
+/// underflows on the way; within about `n` ulp of mpmath on the tests,
+/// `n^2` ulp within 0.1 of a pole, where the rounding of `cos theta`
+/// dominates. SciPy: `sph_legendre_p`.
+///
+/// ```nabi
+/// // Y_0^0 = 1 / sqrt(4 pi).
+/// assert(special::sph_legendre_p(0, 0, 1.3) == 0.28209479177387814);
+/// assert((special::sph_legendre_p(1, 0, 0.0) - 0.4886025119029199).abs() < 4e-16);
+/// ```
+pub fn sph_legendre_p(n: u32, m: i32, theta: f64) -> f64 {
+    if theta != theta { return f64::NAN; }
+    let am = m.unsigned_abs();
+    if am > n { return 0.0; }
+    let (p, e) = sph_plm(n, am, theta);
+    let r = scaled(p, e);
+    if m < 0 && am % 2 == 1 { -r } else { r }
+}
+
+/// The spherical harmonic `Y_n^m(theta, phi) = sph_legendre_p(n, m,
+/// theta) e^(i m phi)` of degree `n` and order `m`, with `theta` the
+/// polar angle (from the z axis) and `phi` the azimuth: SciPy's
+/// `sph_harm_y` and mpmath's `spherharm` argument order and the
+/// Condon-Shortley phase, orthonormal on the sphere. 0 for `|m| > n`.
+/// Within about `n` ulp of mpmath on the tests.
+///
+/// ```nabi
+/// let y = special::sph_harm(1, 1, 0.5, 0.0);
+/// // Y_1^1 = -sqrt(3 / (8 pi)) sin(theta) e^(i phi).
+/// assert((y.re + (3.0 / (8.0 * 3.141592653589793)).sqrt() * 0.5f64.sin()).abs() < 4e-16 && y.im == 0.0);
+/// ```
+pub fn sph_harm(n: u32, m: i32, theta: f64, phi: f64) -> Complex<f64> {
+    let p = sph_legendre_p(n, m, theta);
+    let a = (m as f64) * phi;
+    Complex::new(p * a.cos(), p * a.sin())
+}

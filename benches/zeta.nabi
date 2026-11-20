@@ -1,0 +1,71 @@
+// zeta, Hurwitz zeta and polygamma at 1000 points per call. Items are
+// function values, so ns/item is the cost of one.
+
+use core::bench::Bench;
+use core::hint::black_box;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 1000;
+
+/// `N` uniform points in [lo, hi) from a fixed seed.
+fn points(lo: f64, hi: f64) -> List<f64> {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.uniform(lo, hi)); }
+    xs
+}
+
+#[bench]
+fn zeta_pos(b: Bench) {
+    let x = points(1.5, 40.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::zeta(v); }
+        s
+    });
+}
+
+#[bench]
+fn zeta_strip(b: Bench) {
+    let x = points(-0.4, 2.9);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::zeta(v); }
+        s
+    });
+}
+
+#[bench]
+fn zeta_neg(b: Bench) {
+    let x = points(-50.0, -0.5);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::zeta(v); }
+        s
+    });
+}
+
+#[bench]
+fn hurwitz(b: Bench) {
+    let x = points(0.1, 20.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::hurwitz(3.5, v); }
+        s
+    });
+}
+
+#[bench]
+fn polygamma3(b: Bench) {
+    let x = points(0.1, 20.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::polygamma(3, v); }
+        s
+    });
+}

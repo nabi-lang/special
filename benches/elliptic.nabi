@@ -1,0 +1,106 @@
+// Elliptic integrals, Jacobi functions, Legendre polynomials and
+// Gauss-Legendre rules. The scalar benches walk 100000 arguments per
+// call, so items/s reads as evaluations per second.
+
+use core::bench::Bench;
+use core::hint::black_box;
+
+const N: usize = 100000;
+
+fn args(lo: f64, hi: f64) -> List<f64> {
+    let xs: List<f64> = List::with_capacity(N);
+    for i in 0..N { xs.push(lo + (hi - lo) * (i as f64 + 0.5) / N as f64); }
+    xs
+}
+
+#[bench]
+fn ellipk_1e5(b: Bench) {
+    let m = args(-1.0, 0.999);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for x in black_box(m) { s += pkg::ellipk(x); }
+        s
+    });
+}
+
+#[bench]
+fn ellipe_1e5(b: Bench) {
+    let m = args(-1.0, 0.999);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for x in black_box(m) { s += pkg::ellipe(x); }
+        s
+    });
+}
+
+#[bench]
+fn elliprf_1e5(b: Bench) {
+    let x = args(0.0, 4.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::elliprf(v, 1.0, 2.0); }
+        s
+    });
+}
+
+#[bench]
+fn ellipkinc_1e5(b: Bench) {
+    let phi = args(-3.0, 3.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(phi) { s += pkg::ellipkinc(v, 0.7); }
+        s
+    });
+}
+
+#[bench]
+fn ellipj_1e5(b: Bench) {
+    let u = args(-5.0, 5.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(u) { s += pkg::ellipj(v, 0.6).0; }
+        s
+    });
+}
+
+#[bench]
+fn eval_legendre_20_1e5(b: Bench) {
+    let x = args(-1.0, 1.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::eval_legendre(20, v); }
+        s
+    });
+}
+
+#[bench]
+fn sph_harm_30_1e5(b: Bench) {
+    let t = args(0.0, 3.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(t) { s += pkg::sph_harm(30, 7, v, 0.4).re; }
+        s
+    });
+}
+
+#[bench]
+fn roots_legendre_100(b: Bench) {
+    b.iter(|| try! pkg::roots_legendre(black_box(100)));
+}
+
+#[bench]
+fn roots_legendre_1000(b: Bench) {
+    b.iter(|| try! pkg::roots_legendre(black_box(1000)));
+}
+
+#[bench]
+fn roots_hermite_100(b: Bench) {
+    b.iter(|| try! pkg::roots_hermite(black_box(100)));
+}

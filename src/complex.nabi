@@ -1,0 +1,228 @@
+// The gamma function family over Complex<f64>, with the complex sin(pi z)
+// and cos(pi z) the other complex routines share.
+//
+// ln Gamma(z) is Hare's principal branch (1997), as SciPy's `loggamma`:
+// Stirling's series where |Re z| or |Im z| passes 7, the Taylor series
+// about 1 and 2 near those zeros, the reflection formula left of 0.1
+// (its 2 pi i k term keeps the branch continuous off the negative real
+// axis), and the recurrence up into Stirling's range elsewhere, counting
+// the times the running product crosses the negative real axis.
+
+use pkg::gammas::{cospi, digamma, gamma, lgamma, sinpi};
+use core::num::Complex;
+
+const PI: f64 = 3.141592653589793;
+const LN_PI: f64 = 1.1447298858494002;
+const LN_SQRT_2PI: f64 = 0.9189385332046728;
+const EULER: f64 = 0.5772156649015329;
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `re + im i`.
+pub(pkg) fn cx(re: f64, im: f64) -> Complex<f64> { Complex::new(re, im) }
+
+/// `sin(pi z)`, exact on the real integers.
+pub(pkg) fn csinpi(z: Complex<f64>) -> Complex<f64> {
+    let y = PI * z.im;
+    cx(sinpi(z.re) * y.cosh(), cospi(z.re) * y.sinh())
+}
+
+/// `cos(pi z)`.
+pub(pkg) fn ccospi(z: Complex<f64>) -> Complex<f64> {
+    let y = PI * z.im;
+    cx(cospi(z.re) * y.cosh(), -sinpi(z.re) * y.sinh())
+}
+
+/// `ln z` accurate near 1, where `z.ln()` loses `z - 1`.
+fn cln1(z: Complex<f64>) -> Complex<f64> {
+    let u = z - 1.0;
+    if u.abs() > 0.1 { return z.ln(); }
+    if u.re == 0.0 && u.im == 0.0 { return u; }
+    // ln(1 + u) = u - u^2/2 + u^3/3 - ...
+    let s = cx(0.0, 0.0);
+    let p = cx(-1.0, 0.0);
+    let n = 1.0;
+    while n < 40.0 {
+        p = p * (-u);
+        let t = p / n;
+        s = s + t;
+        if t.abs() <= EPS * 0.5 * s.abs() { break; }
+        n += 1.0;
+    }
+    s
+}
+
+// (-1)^k zeta(k) / k for k = 2..24: ln Gamma(1 + z) = -euler z + sum.
+const LGT: [f64; 23] = [
+    0.8224670334241132, -0.40068563438653143, 0.27058080842778454, -0.20738555102867398,
+    0.1695571769974082, -0.1440498967688461, 0.12550966952474304, -0.11133426586956469,
+    0.1000994575127818, -0.09095401714582904, 0.083353840546109, -0.0769325164113522,
+    0.07143294629536133, -0.06666870588242046, 0.06250095514121304, -0.058823978658684585,
+    0.055555767627403614, -0.05263167937961666, 0.05000004769810169, -0.047619070330142226,
+    0.04545455629320467, -0.04347826605304026, 0.04166666915034121,
+];
+
+// B_2k / (2k (2k - 1)) for k = 8 down to 1, for Horner's rule.
+const ST: [f64; 8] = [
+    -0.029550653594771242, 0.00641025641025641, -0.0019175269175269176, 0.0008417508417508417,
+    -0.0005952380952380953, 0.0007936507936507937, -0.002777777777777778, 0.08333333333333333,
+];
+
+fn lg_taylor(z: Complex<f64>) -> Complex<f64> {
+    let u = z - 1.0;
+    let s = cx(0.0, 0.0);
+    let k = 23usize;
+    while k > 0 {
+        k -= 1;
+        s = s * u + LGT[k];
+    }
+    u * (u * s - EULER)
+}
+
+fn lg_stirling(z: Complex<f64>) -> Complex<f64> {
+    let r = 1.0 / z;
+    let r2 = r * r;
+    let s = cx(0.0, 0.0);
+    for c in ST { s = s * r2 + c; }
+    (z - 0.5) * z.ln() - z + LN_SQRT_2PI + r * s
+}
+
+fn lg_recurrence(z: Complex<f64>) -> Complex<f64> {
+    let flips = 0.0;
+    let neg = false;
+    let prod = z;
+    let w = z + 1.0;
+    while w.re <= 7.0 {
+        prod = prod * w;
+        let n = prod.im.is_sign_negative();
+        if n && !neg { flips += 1.0; }
+        neg = n;
+        w = w + 1.0;
+    }
+    lg_stirling(w) - prod.ln() - cx(0.0, 2.0 * PI * flips)
+}
+
+// B_2k / (2k) for k = 9 down to 1, the asymptotic series of psi.
+const PSI: [f64; 9] = [
+    3.0539543302701198, -0.4432598039215686, 0.08333333333333333, -0.021092796092796094,
+    0.007575757575757576, -0.004166666666666667, 0.003968253968253968, -0.008333333333333333,
+    0.08333333333333333,
+];
+
+/// The principal branch of `ln Gamma(z)` (SciPy's `loggamma`): equal to
+/// `lgamma(x)` on the positive real axis and continuous everywhere off
+/// the negative real axis, across which its imaginary part steps by 2
+/// pi. About 1e-15 relative where Stirling's series is used (|Re z| or
+/// |Im z| past 7); nearer 0 the recurrence cancels to about 5e-15
+/// absolute (3e-15 measured), and the Taylor series about 1 and 2 keep
+/// full relative accuracy at those zeros. `NaN` at the poles 0, -1, -2,
+/// ...
+///
+/// ```nabi
+/// let z = special::clgamma(1.0 + 1.0i);
+/// assert((z.re + 0.6509231993018564).abs() < 5e-15 && (z.im + 0.3016403204675332).abs() < 5e-15);
+/// assert(special::clgamma(5.0 + 0.0i).re == 24f64.ln());
+/// ```
+pub fn clgamma(z: Complex<f64>) -> Complex<f64> {
+    if z.is_nan() { return cx(f64::NAN, f64::NAN); }
+    if z.im == 0.0 && z.re > 0.0 { return cx(lgamma(z.re), z.im); }
+    if z.re <= 0.0 && z.im == 0.0 && z.re == z.re.floor() { return cx(f64::NAN, f64::NAN); }
+    if z.re > 7.0 || z.im.abs() > 7.0 { return lg_stirling(z); }
+    if (z - 1.0).abs() <= 0.2 { return lg_taylor(z); }
+    if (z - 2.0).abs() <= 0.2 { return cln1(z - 1.0) + lg_taylor(z - 1.0); }
+    if z.re < 0.1 {
+        let k = (0.5 * z.re + 0.25).floor();
+        let t = if z.im.is_sign_negative() { -2.0 * PI * k } else { 2.0 * PI * k };
+        return cx(LN_PI, t) - csinpi(z).ln() - clgamma(1.0 - z);
+    }
+    if !z.im.is_sign_negative() { return lg_recurrence(z); }
+    lg_recurrence(z.conj()).conj()
+}
+
+/// `Gamma(z)` for complex `z`, as `exp(clgamma(z))` (the real gamma on
+/// the real axis), so its relative error is the absolute error of `ln
+/// Gamma`: about 5e-15 within 7 of the origin, `|ln Gamma(z)| eps` past
+/// it (2.5e-14 measured at |z| = 20). `NaN` at the poles.
+/// SciPy: `gamma` of a complex argument.
+///
+/// ```nabi
+/// let g = special::cgamma(0.5 + 0.0i);
+/// assert((g.re - 1.7724538509055159).abs() < 1e-15 && g.im == 0.0);
+/// let h = special::cgamma(1.0i);
+/// assert((h.re + 0.15494982830181067).abs() < 5e-15 && (h.im + 0.49801566811835607).abs() < 5e-15);
+/// ```
+pub fn cgamma(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 {
+        if z.re <= 0.0 && z.re == z.re.floor() { return cx(f64::NAN, f64::NAN); }
+        return cx(gamma(z.re), 0.0);
+    }
+    clgamma(z).exp()
+}
+
+/// `1 / Gamma(x)`, entire: 0 at the poles 0, -1, -2, ..., no overflow
+/// past 171.6 (it underflows to 0 instead). A few ulp. SciPy: `rgamma`.
+///
+/// ```nabi
+/// assert(special::rgamma(-3.0) == 0.0 && special::rgamma(4.0) == 1.0 / 6.0);
+/// ```
+pub fn rgamma(x: f64) -> f64 {
+    if x != x { return x; }
+    if x <= 0.0 && x == x.floor() { return 0.0; }
+    if x > 171.6 { return (-lgamma(x)).exp(); }
+    if x < -1.0 {
+        // Gamma(1 - x) sin(pi x) / pi, so the small Gamma(x) far left is
+        // not formed.
+        // 1 - x as t + tl, the low part through psi.
+        let s = sinpi(x);
+        let t = 1.0 - x;
+        let c = digamma(t) * ((1.0 - t) - x);
+        if t < 171.6 { return gamma(t) * (1.0 + c) * s / PI; }
+        let m = (lgamma(t) + c + s.abs().ln() - LN_PI).exp();
+        return if s < 0.0 { -m } else { m };
+    }
+    1.0 / gamma(x)
+}
+
+/// `1 / Gamma(z)` for complex `z`: 0 at the poles, `exp(-clgamma(z))`
+/// elsewhere. SciPy: `rgamma` of a complex argument.
+///
+/// ```nabi
+/// let r = special::crgamma(-2.0 + 0.0i);
+/// assert(r.re == 0.0 && r.im == 0.0);
+/// ```
+pub fn crgamma(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 { return cx(rgamma(z.re), 0.0); }
+    (-clgamma(z)).exp()
+}
+
+/// The digamma function `psi(z)` for complex `z`: reflection `psi(1 - z)
+/// - pi cot(pi z)` left of 0, the recurrence up to `|z| >= 10` and the
+/// asymptotic series there (`B_2k / 2k` through k = 9). About 1e-15
+/// relative (7e-16 measured) except near the zeros on the real axis,
+/// where the error is 1e-16 absolute; the real `digamma` on the real
+/// axis. `NaN` at the
+/// poles. SciPy: `psi` of a complex argument.
+///
+/// ```nabi
+/// let p = special::cdigamma(1.0i);
+/// assert((p.re - 0.09465032062247697).abs() < 1e-15 && (p.im - 2.0766740474685810).abs() < 1e-15);
+/// ```
+pub fn cdigamma(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 { return cx(digamma(z.re), 0.0); }
+    if z.is_nan() { return cx(f64::NAN, f64::NAN); }
+    if z.re < 0.0 {
+        // pi cot(pi z) = pi cos(pi z) / sin(pi z); past |Im z| = 20 it is
+        // -+pi i to double precision.
+        let c = if z.im.abs() > 20.0 { cx(0.0, if z.im > 0.0 { -PI } else { PI }) } else { PI * ccospi(z) / csinpi(z) };
+        return cdigamma(1.0 - z) - c;
+    }
+    let s = cx(0.0, 0.0);
+    let w = z;
+    while w.abs() < 10.0 {
+        s = s - 1.0 / w;
+        w = w + 1.0;
+    }
+    let r = 1.0 / (w * w);
+    let t = cx(0.0, 0.0);
+    for c in PSI { t = t * r + c; }
+    s + w.ln() - 0.5 / w - r * t
+}

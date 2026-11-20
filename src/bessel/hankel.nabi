@@ -1,0 +1,62 @@
+// The Hankel functions H1 = J + iY and H2 = J - iY for real order and x > 0.
+
+use pkg::bessel::integer::{jn, yn};
+use pkg::bessel::real::{integral, jy};
+use pkg::gammas::{cospi, sinpi};
+use core::num::Complex;
+
+/// `(J_v(x), Y_v(x))` for any real `v`, `x > 0`.
+fn pair(v: f64, x: f64) -> (f64, f64) {
+    if integral(v) { return (jn(v as i32, x), yn(v as i32, x)); }
+    if x == f64::INFINITY { return (0.0, 0.0); }
+    if v > 0.0 { return jy(v, x); }
+    let (j, y) = jy(-v, x);
+    let (c, s) = (cospi(-v), sinpi(-v));
+    (c * j - s * y, s * j + c * y)
+}
+
+fn nan() -> Complex<f64> { Complex::new(f64::NAN, f64::NAN) }
+
+/// The Hankel function of the first kind `H1_v(x) = J_v(x) + i Y_v(x)`
+/// for real `v` and `x > 0` (NaN parts otherwise); one evaluation gives
+/// both parts, with the accuracy of `jv` and `yv`. SciPy: `hankel1`.
+///
+/// ```nabi
+/// let h = special::hankel1(0.5, 1.0);
+/// assert(h.re == special::jv(0.5, 1.0) && h.im == special::yv(0.5, 1.0));
+/// ```
+pub fn hankel1(v: f64, x: f64) -> Complex<f64> {
+    if !(x > 0.0) || v != v { return nan(); }
+    let (j, y) = pair(v, x);
+    Complex::new(j, y)
+}
+
+/// The Hankel function of the second kind `H2_v(x) = J_v(x) - i Y_v(x)`.
+/// SciPy: `hankel2`.
+///
+/// ```nabi
+/// assert(special::hankel2(1.5, 2.0) == special::hankel1(1.5, 2.0).conj());
+/// ```
+pub fn hankel2(v: f64, x: f64) -> Complex<f64> { hankel1(v, x).conj() }
+
+/// `H1_v(x) e^-ix`, which is smooth in `x` (`|H1| ~ sqrt(2 / (pi x))`
+/// with the oscillation removed). SciPy: `hankel1e`.
+///
+/// ```nabi
+/// let h = special::hankel1e(0.5, 100.0);
+/// // H1_1/2(x) = -i sqrt(2 / (pi x)) e^ix.
+/// assert(h.re.abs() < 1e-16 && (h.im + (2.0 / (3.141592653589793 * 100.0)).sqrt()).abs() < 3e-16);
+/// ```
+pub fn hankel1e(v: f64, x: f64) -> Complex<f64> {
+    if !(x > 0.0) || v != v { return nan(); }
+    let (j, y) = pair(v, x);
+    let (c, s) = (x.cos(), x.sin());
+    Complex::new(j * c + y * s, y * c - j * s)
+}
+
+/// `H2_v(x) e^ix`. SciPy: `hankel2e`.
+///
+/// ```nabi
+/// assert(special::hankel2e(0.5, 3.0) == special::hankel1e(0.5, 3.0).conj());
+/// ```
+pub fn hankel2e(v: f64, x: f64) -> Complex<f64> { hankel1e(v, x).conj() }

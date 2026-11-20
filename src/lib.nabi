@@ -1,0 +1,54 @@
+//! Special functions of mathematical physics and statistics, over f64
+//! and, where standard, Complex<f64>. The functions are scalar and follow
+//! SciPy's names; `f.(x)` maps one over an array and `apply` does it on
+//! all cores. A domain error gives NaN; only the table builders throw
+//! `SpecialError`. Pure Nabi, so it builds for every target, wasm included.
+
+pub mod notation;
+
+mod airy;
+mod apply;
+mod bessel;
+mod betas;
+mod combinatorics;
+mod complex;
+mod elementary;
+mod elliptic;
+mod error;
+mod expint;
+mod faddeeva;
+mod fresnel;
+mod gammas;
+mod lambert;
+mod legendre;
+mod logistic;
+mod normal;
+mod orthopoly;
+mod polygamma;
+mod struve;
+mod zeta;
+
+pub use airy::{ai, aip, airy, airye, bi, bip};
+pub use apply::apply;
+pub use bessel::{hankel1, hankel1e, hankel2, hankel2e, i0, i0e, i1, i1e, iv, ive, j0, j1, jn, jv, jve, k0, k0e, k1, k1e, kn, kv, kve, spherical_in, spherical_jn, spherical_kn, spherical_yn, y0, y1, yn, yv, yve};
+pub use betas::{beta, betainc, betainc_factor, betainc_pq, betaincc, betainccinv, betaincinv, lbeta, lcomb};
+pub use combinatorics::{binom, comb, comb_exact, factorial, factorial2, factorial2_exact, factorial_exact, lfactorial, multicomb, perm, perm_exact, poch, stirling2};
+pub use complex::{cdigamma, cgamma, clgamma, crgamma, rgamma};
+pub use elementary::Elementary;
+pub use elliptic::carlson::{elliprc, elliprd, elliprf, elliprg, elliprj};
+pub use elliptic::jacobi::ellipj;
+pub use elliptic::legendre::{ellipe, ellipeinc, ellipk, ellipkinc, ellipkm1, ellippi, ellippiinc};
+pub use error::SpecialError;
+pub use expint::{chi, ci, e1, ei, expn, shi, shichi, si, sici};
+pub use faddeeva::{cdawson, cerf, cerfc, cerfcx, cerfi, dawson, erfcx, erfi, wofz};
+pub use fresnel::fresnel;
+pub use gammas::{cospi, digamma, gamma, gammainc, gammainc_factor, gammainc_pq, gammaincc, gammainccinv, gammaincinv, lgamma, lgamma1p, log1pmx, sinpi, trigamma};
+pub use lambert::lambertw;
+pub use legendre::{assoc_legendre_p, lpmv, sph_harm, sph_legendre_p};
+pub use logistic::{expit, log1mexp, log1pexp, log_expit, log_softmax, logaddexp, logit, logsumexp, logsumexp_axis, softmax};
+pub use normal::{erf, erfc, erfcinv, erfinv, ndtr, ndtri, ndtri_pq};
+pub use orthopoly::eval::{eval_chebyt, eval_chebyu, eval_gegenbauer, eval_genlaguerre, eval_hermite, eval_hermitenorm, eval_jacobi, eval_laguerre, eval_legendre};
+pub use orthopoly::quadrature::{roots_chebyt, roots_chebyu, roots_gegenbauer, roots_genlaguerre, roots_hermite, roots_hermitenorm, roots_jacobi, roots_laguerre, roots_legendre};
+pub use polygamma::polygamma;
+pub use struve::{struve_h, struve_l};
+pub use zeta::{czeta, hurwitz, zeta, zetac};

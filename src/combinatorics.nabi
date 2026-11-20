@@ -1,0 +1,298 @@
+// Factorials, binomial coefficients and permutations, as f64 and as
+// exact `int`s.
+//
+// The f64 forms are exact while the value fits 53 bits and correctly
+// rounded above (the exact integer, rounded once), or come from
+// lgamma / lbeta where the exact integer would be too large to build
+// (relative error near 1e-15 times the log of the result). The exact
+// forms multiply by binary splitting, so the big products are balanced
+// and core's subquadratic multiplication does the work.
+
+use pkg::betas::lbeta;
+use pkg::gammas::{gamma, lgamma, sinpi};
+
+// 2^53: integers below it are exact in f64.
+const EXACT: f64 = 9007199254740992.0;
+
+/// The product `lo * (lo + 1) * ... * hi` (1 when `lo > hi`) by binary
+/// splitting.
+fn prod(lo: u64, hi: u64) -> int {
+    if lo > hi { return 1; }
+    if hi - lo < 16u64 {
+        let p: int = 1;
+        let k = lo;
+        while k <= hi {
+            p = p * int::from_u64(k);
+            k += 1u64;
+        }
+        return p;
+    }
+    let mid = lo + (hi - lo) / 2u64;
+    prod(lo, mid) * prod(mid + 1u64, hi)
+}
+
+/// The product `lo * (lo + 2) * ... * hi` of a run of one parity.
+fn prod2(lo: u64, hi: u64) -> int {
+    if lo > hi { return 1; }
+    let n = (hi - lo) / 2u64;
+    if n < 16u64 {
+        let p: int = 1;
+        let k = lo;
+        while k <= hi {
+            p = p * int::from_u64(k);
+            k += 2u64;
+        }
+        return p;
+    }
+    let mid = lo + 2u64 * (n / 2u64);
+    prod2(lo, mid) * prod2(mid + 2u64, hi)
+}
+
+/// `n!` as an exact integer. Binary splitting: 100000! (456574
+/// digits) takes a few tens of milliseconds.
+///
+/// ```nabi
+/// assert(special::factorial_exact(25) == 15511210043330985984000000);
+/// assert(f"{special::factorial_exact(100)}".len() == 158);
+/// ```
+pub fn factorial_exact(n: u64) -> int { prod(2u64, n) }
+
+/// `n!` as f64: exact through 22!, correctly rounded through 170!,
+/// `inf` past it. SciPy: `factorial`.
+///
+/// ```nabi
+/// assert(special::factorial(5) == 120.0);
+/// assert(special::factorial(171) == f64::INFINITY);
+/// ```
+pub fn factorial(n: u64) -> f64 {
+    if n > 170u64 { return f64::INFINITY; }
+    if n <= 22u64 { return gamma((n + 1u64) as f64); }
+    prod(2u64, n).to_f64()
+}
+
+/// `ln n!`, for any size of `n`.
+///
+/// ```nabi
+/// assert((special::lfactorial(1000) - 5912.128178488163).abs() < 1e-11);
+/// ```
+pub fn lfactorial(n: u64) -> f64 { lgamma(n as f64 + 1.0) }
+
+/// The double factorial `n!! = n (n - 2) (n - 4) ...` down to 1 or 2,
+/// as an exact integer; `0!! = 1`.
+///
+/// ```nabi
+/// assert(special::factorial2_exact(9) == 945 && special::factorial2_exact(10) == 3840);
+/// ```
+pub fn factorial2_exact(n: u64) -> int {
+    if n < 2u64 { return 1; }
+    prod2(2u64 - n % 2u64, n)
+}
+
+/// The double factorial `n!!` as f64, for `n >= -1` (`(-1)!! = 0!! =
+/// 1`); exact while it fits 53 bits, correctly rounded up to `inf`
+/// past 300!!. NaN below -1. SciPy: `factorial2`.
+///
+/// ```nabi
+/// assert(special::factorial2(7) == 105.0 && special::factorial2(-1) == 1.0);
+/// ```
+pub fn factorial2(n: i64) -> f64 {
+    if n < -1 { return f64::NAN; }
+    if n < 2 { return 1.0; }
+    if n > 300 { return f64::INFINITY; }
+    factorial2_exact(n as u64).to_f64()
+}
+
+/// The binomial coefficient `C(n, k)` as an exact integer (0 for `k >
+/// n`).
+///
+/// ```nabi
+/// assert(special::comb_exact(10, 3) == 120);
+/// assert(special::comb_exact(100, 50) == 100891344545564193334812497256);
+/// ```
+pub fn comb_exact(n: u64, k: u64) -> int {
+    if k > n { return 0; }
+    let j = if k > n - k { n - k } else { k };
+    prod(n - j + 1u64, n) / prod(2u64, j)
+}
+
+/// `C(n, k)` as f64: exact while below 2^53, correctly rounded up to
+/// the f64 range, from `lcomb` past the point where the exact integer
+/// would have more than 2000 bits (so then about 1e-13 relative). 0
+/// for `k > n`. SciPy: `comb`.
+///
+/// ```nabi
+/// assert(special::comb(52, 5) == 2598960.0);
+/// assert(special::comb(1030, 515) == f64::INFINITY);
+/// ```
+pub fn comb(n: u64, k: u64) -> f64 {
+    if k > n { return 0.0; }
+    let j = if k > n - k { n - k } else { k };
+    if j == 0u64 { return 1.0; }
+    // Products of small factors stay exact in f64 while below 2^53.
+    let r = 1.0;
+    let i = 1u64;
+    while i <= j {
+        let next = r * ((n - j + i) as f64);
+        if next >= EXACT { break; }
+        r = next / (i as f64);
+        i += 1u64;
+    }
+    if i > j { return r; }
+    let l = -((n as f64) + 1.0).ln() - lbeta((n - j + 1u64) as f64, (j + 1u64) as f64);
+    if l > 710.0 { return f64::INFINITY; }
+    if j > 2000u64 { return l.exp(); }
+    comb_exact(n, j).to_f64()
+}
+
+/// `C(n + k - 1, k)`: the number of multisets of size `k` from `n`
+/// kinds (SciPy's `comb(n, k, repetition=True)`).
+///
+/// ```nabi
+/// assert(special::multicomb(3, 2) == 6.0);
+/// ```
+pub fn multicomb(n: u64, k: u64) -> f64 {
+    if n == 0u64 { return if k == 0u64 { 1.0 } else { 0.0 }; }
+    comb(n + k - 1u64, k)
+}
+
+/// The number of ordered selections `n! / (n - k)!` as an exact
+/// integer (0 for `k > n`).
+///
+/// ```nabi
+/// assert(special::perm_exact(10, 3) == 720);
+/// ```
+pub fn perm_exact(n: u64, k: u64) -> int {
+    if k > n { return 0; }
+    prod(n - k + 1u64, n)
+}
+
+/// `n! / (n - k)!` as f64, correctly rounded (0 for `k > n`, `inf` past
+/// the f64 range). SciPy: `perm`.
+///
+/// ```nabi
+/// assert(special::perm(10, 3) == 720.0);
+/// ```
+pub fn perm(n: u64, k: u64) -> f64 {
+    if k > n { return 0.0; }
+    let l = lgamma(n as f64 + 1.0) - lgamma((n - k) as f64 + 1.0);
+    if l > 710.0 { return f64::INFINITY; }
+    if k > 2000u64 { return l.exp(); }
+    prod(n - k + 1u64, n).to_f64()
+}
+
+/// The binomial coefficient for real arguments, `Gamma(n + 1) /
+/// (Gamma(k + 1) Gamma(n - k + 1))`, continued through the poles as
+/// the limit (0 where only the denominator has one, the generalized
+/// `n (n - 1) ... (n - k + 1) / k!` for integer `k` and any `n`).
+/// Correctly rounded at integer `n` and `k`, about `k` ulp for integer
+/// `k` below 1000, about 1e-15 times `ln |result|` otherwise.
+/// SciPy: `binom`.
+///
+/// ```nabi
+/// assert(special::binom(5.0, 2.0) == 10.0);
+/// assert((special::binom(0.5, 2.0) + 0.125).abs() < 1e-16);
+/// assert(special::binom(-1.0, 3.0) == -1.0);
+/// ```
+pub fn binom(n: f64, k: f64) -> f64 {
+    if n != n || k != k { return f64::NAN; }
+    let kint = k == k.floor();
+    if kint && n == n.floor() && n >= 0.0 && n < EXACT {
+        if k < 0.0 || k > n { return 0.0; }
+        return comb(n as u64, k as u64);
+    }
+    if kint && k >= 0.0 && k < 1000.0 {
+        // n (n - 1) ... (n - k + 1) / k!: k roundings.
+        let r = 1.0;
+        let i = 1.0;
+        while i <= k {
+            r *= (n - k + i) / i;
+            i += 1.0;
+        }
+        return r;
+    }
+    if kint && k < 0.0 { return 0.0; }
+    if n > -1.0 && n - k > -1.0 && k > -1.0 {
+        // All three arguments of Gamma positive.
+        return 1.0 / ((n + 1.0) * lbeta(n - k + 1.0, k + 1.0).exp());
+    }
+    // A negative argument of Gamma: the quotient, through the reflection
+    // formula inside gamma.
+    let d = gamma(k + 1.0) * gamma(n - k + 1.0);
+    if d.is_infinite() { return 0.0; }
+    gamma(n + 1.0) / d
+}
+
+/// The Pochhammer symbol (rising factorial) `(x)_m = Gamma(x + m) /
+/// Gamma(x)`, for real `x` and `m`; `x (x + 1) ... (x + m - 1)` for
+/// integer `m >= 0`. SciPy: `poch`.
+///
+/// ```nabi
+/// assert(special::poch(3.0, 4.0) == 360.0);
+/// assert(special::poch(-3.0, 2.0) == 6.0);
+/// assert((special::poch(0.5, 0.5) - 0.5641895835477563).abs() < 1e-16);
+/// ```
+pub fn poch(x: f64, m: f64) -> f64 {
+    if x != x || m != m { return f64::NAN; }
+    if m == 0.0 { return 1.0; }
+    if m == m.floor() && m > 0.0 && m < 200.0 {
+        let r = 1.0;
+        let i = 0.0;
+        while i < m {
+            r *= x + i;
+            i += 1.0;
+        }
+        return r;
+    }
+    if m == m.floor() && m < 0.0 && m > -200.0 {
+        // 1 / ((x - 1) (x - 2) ... (x + m)).
+        let r = 1.0;
+        let i = 1.0;
+        while i <= -m {
+            r *= x - i;
+            i += 1.0;
+        }
+        return 1.0 / r;
+    }
+    if x > 0.0 && x + m > 0.0 {
+        let s = lgamma(x + m) - lgamma(x);
+        return s.exp();
+    }
+    // Signs from the reflection formula.
+    let g = gamma(x + m);
+    let h = gamma(x);
+    if h.is_infinite() || h != h {
+        // x a pole: the ratio of the residues when x + m is one too.
+        let xm = x + m;
+        if xm == xm.floor() && xm <= 0.0 {
+            // (-1)^m (-x)! / (-x - m)!.
+            let s = if (m as i64) % 2 == 0 { 1.0 } else { -1.0 };
+            return s * gamma(1.0 - x) / gamma(1.0 - x - m);
+        }
+        return 0.0;
+    }
+    if !g.is_finite() { return (lgamma(x + m) - lgamma(x)).exp() * sinpi(x).signum() * sinpi(x + m).signum(); }
+    g / h
+}
+
+/// The Stirling number of the second kind `S(n, k)`: the number of ways
+/// to split `n` items into `k` non-empty sets, exact. SciPy:
+/// `stirling2(exact=True)`.
+///
+/// ```nabi
+/// assert(special::stirling2(5, 2) == 15 && special::stirling2(10, 3) == 9330);
+/// ```
+pub fn stirling2(n: u64, k: u64) -> int {
+    if k > n { return 0; }
+    if k == 0u64 { return if n == 0u64 { 1 } else { 0 }; }
+    // k! S(n, k) = sum_j (-1)^(k - j) C(k, j) j^n.
+    let s: int = 0;
+    let c: int = 1;
+    let j = 0u64;
+    while j <= k {
+        let t = c * int::from_u64(j).pow(n as u32);
+        if (k - j) % 2u64 == 0u64 { s = s + t; } else { s = s - t; }
+        c = c * int::from_u64(k - j) / int::from_u64(j + 1u64);
+        j += 1u64;
+    }
+    s / prod(2u64, k)
+}

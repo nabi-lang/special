@@ -1,0 +1,270 @@
+//! The functions under the names of the textbooks: `Γ(x)`, `ψ(x)`,
+//! `ζ(s)`, `J₀(x)`, `Φ⁻¹(p)`. Greek letters, subscript digits, primes and
+//! superscripts are identifier characters, so these are plain functions,
+//! each the same as the ASCII one it names. Import the ones you want
+//! (`use special::notation::{Γ, ψ}`) or all of them
+//! (`use special::notation::*`).
+
+/// `Γ(x)`: `special::gamma`.
+///
+/// ```nabi
+/// use special::notation::Γ;
+///
+/// assert(Γ(5.0) == 24.0);
+/// ```
+pub fn Γ(x: f64) -> f64 { pkg::gamma(x) }
+
+/// `lnΓ(x)`: `special::lgamma`.
+///
+/// ```nabi
+/// use special::notation::lnΓ;
+///
+/// assert(lnΓ(2.0) == 0.0);
+/// ```
+pub fn lnΓ(x: f64) -> f64 { pkg::lgamma(x) }
+
+/// `ψ(x)`: the digamma function, `special::digamma`.
+///
+/// ```nabi
+/// use special::notation::ψ;
+///
+/// assert((ψ(1.0) + 0.5772156649015329).abs() < 1e-16);
+/// ```
+pub fn ψ(x: f64) -> f64 { pkg::digamma(x) }
+
+/// `ψ′(x)`: the trigamma function, `special::trigamma`.
+///
+/// ```nabi
+/// use special::notation::ψ′;
+///
+/// assert((ψ′(1.0) - 1.6449340668482264).abs() < 1e-15);
+/// ```
+pub fn ψ′(x: f64) -> f64 { pkg::trigamma(x) }
+
+/// `Β(a, b)` (a capital beta, U+0392): `special::beta`.
+///
+/// ```nabi
+/// use special::notation::Β;
+///
+/// assert((Β(2.0, 3.0) - 1.0 / 12.0).abs() < 1e-17);
+/// ```
+pub fn Β(a: f64, b: f64) -> f64 { pkg::beta(a, b) }
+
+/// `Φ(x)`: the standard normal CDF, `special::ndtr`.
+///
+/// ```nabi
+/// use special::notation::Φ;
+///
+/// assert(Φ(0.0) == 0.5);
+/// ```
+pub fn Φ(x: f64) -> f64 { pkg::ndtr(x) }
+
+/// `Φ⁻¹(p)`: the standard normal quantile, `special::ndtri`.
+///
+/// ```nabi
+/// use special::notation::{Φ, Φ⁻¹};
+///
+/// assert((Φ(Φ⁻¹(0.3)) - 0.3).abs() < 1e-16);
+/// ```
+pub fn Φ⁻¹(p: f64) -> f64 { pkg::ndtri(p) }
+
+/// `erf⁻¹(y)`: `special::erfinv`.
+///
+/// ```nabi
+/// use special::notation::erf⁻¹;
+///
+/// assert(erf⁻¹(0.0) == 0.0);
+/// ```
+pub fn erf⁻¹(y: f64) -> f64 { pkg::erfinv(y) }
+
+/// `J₀(x)`: `special::j0`.
+///
+/// ```nabi
+/// use special::notation::J₀;
+///
+/// assert(J₀(0.0) == 1.0);
+/// ```
+#[allow(non_snake_case)]
+pub fn J₀(x: f64) -> f64 { pkg::j0(x) }
+
+/// `J₁(x)`: `special::j1`.
+///
+/// ```nabi
+/// use special::notation::J₁;
+///
+/// assert(J₁(0.0) == 0.0);
+/// ```
+#[allow(non_snake_case)]
+pub fn J₁(x: f64) -> f64 { pkg::j1(x) }
+
+/// `Y₀(x)`: `special::y0`.
+///
+/// ```nabi
+/// use special::notation::Y₀;
+///
+/// assert(Y₀(0.0) == f64::NEG_INFINITY);
+/// ```
+#[allow(non_snake_case)]
+pub fn Y₀(x: f64) -> f64 { pkg::y0(x) }
+
+/// `Y₁(x)`: `special::y1`.
+///
+/// ```nabi
+/// use special::notation::Y₁;
+///
+/// assert(Y₁(0.0) == f64::NEG_INFINITY);
+/// ```
+#[allow(non_snake_case)]
+pub fn Y₁(x: f64) -> f64 { pkg::y1(x) }
+
+/// `I₀(x)`: `special::i0`.
+///
+/// ```nabi
+/// use special::notation::I₀;
+///
+/// assert(I₀(0.0) == 1.0);
+/// ```
+#[allow(non_snake_case)]
+pub fn I₀(x: f64) -> f64 { pkg::i0(x) }
+
+/// `I₁(x)`: `special::i1`.
+///
+/// ```nabi
+/// use special::notation::I₁;
+///
+/// assert(I₁(0.0) == 0.0);
+/// ```
+#[allow(non_snake_case)]
+pub fn I₁(x: f64) -> f64 { pkg::i1(x) }
+
+/// `K₀(x)`: `special::k0`.
+///
+/// ```nabi
+/// use special::notation::K₀;
+///
+/// assert(K₀(0.0) == f64::INFINITY);
+/// ```
+#[allow(non_snake_case)]
+pub fn K₀(x: f64) -> f64 { pkg::k0(x) }
+
+/// `K₁(x)`: `special::k1`.
+///
+/// ```nabi
+/// use special::notation::K₁;
+///
+/// assert(K₁(0.0) == f64::INFINITY);
+/// ```
+#[allow(non_snake_case)]
+pub fn K₁(x: f64) -> f64 { pkg::k1(x) }
+
+/// `Ai(x)`: `special::ai`.
+///
+/// ```nabi
+/// use special::notation::Ai;
+///
+/// assert((Ai(0.0) - 0.3550280538878172).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn Ai(x: f64) -> f64 { pkg::ai(x) }
+
+/// `Ai′(x)`: `special::aip`.
+///
+/// ```nabi
+/// use special::notation::Ai′;
+///
+/// assert((Ai′(0.0) + 0.2588194037928068).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn Ai′(x: f64) -> f64 { pkg::aip(x) }
+
+/// `Bi(x)`: `special::bi`.
+///
+/// ```nabi
+/// use special::notation::Bi;
+///
+/// assert(Bi(1.0) > 1.2);
+/// ```
+#[allow(non_snake_case)]
+pub fn Bi(x: f64) -> f64 { pkg::bi(x) }
+
+/// `Bi′(x)`: `special::bip`.
+///
+/// ```nabi
+/// use special::notation::Bi′;
+///
+/// assert((Bi′(0.0) - 0.4482883573538264).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn Bi′(x: f64) -> f64 { pkg::bip(x) }
+
+/// `ζ(s)`: the Riemann zeta function, `special::zeta`.
+///
+/// ```nabi
+/// use special::notation::ζ;
+///
+/// assert((ζ(2.0) - 1.6449340668482264).abs() < 1e-15);
+/// ```
+pub fn ζ(s: f64) -> f64 { pkg::zeta(s) }
+
+/// `E₁(x)`: the exponential integral, `special::e1`.
+///
+/// ```nabi
+/// use special::notation::E₁;
+///
+/// assert((E₁(1.0) - 0.21938393439552029).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn E₁(x: f64) -> f64 { pkg::e1(x) }
+
+/// `Ei(x)`: `special::ei`.
+///
+/// ```nabi
+/// use special::notation::Ei;
+///
+/// assert((Ei(1.0) - 1.8951178163559368).abs() < 1e-15);
+/// ```
+#[allow(non_snake_case)]
+pub fn Ei(x: f64) -> f64 { pkg::ei(x) }
+
+/// `Si(x)`: the sine integral, `special::si`.
+///
+/// ```nabi
+/// use special::notation::Si;
+///
+/// assert(Si(0.0) == 0.0);
+/// ```
+#[allow(non_snake_case)]
+pub fn Si(x: f64) -> f64 { pkg::si(x) }
+
+/// `Ci(x)`: the cosine integral, `special::ci`.
+///
+/// ```nabi
+/// use special::notation::Ci;
+///
+/// assert((Ci(1.0) - 0.3374039229009681).abs() < 1e-15);
+/// ```
+#[allow(non_snake_case)]
+pub fn Ci(x: f64) -> f64 { pkg::ci(x) }
+
+/// `W₀(x)`: the principal branch of the Lambert W function,
+/// `special::lambertw(x)`.
+///
+/// ```nabi
+/// use special::notation::W₀;
+///
+/// assert((W₀(1.0) - 0.5671432904097838).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn W₀(x: f64) -> f64 { pkg::lambertw(x) }
+
+/// `W₋₁(x)`: the lower branch of the Lambert W function,
+/// `special::lambertw(x, -1)`.
+///
+/// ```nabi
+/// use special::notation::W₋₁;
+///
+/// let w = W₋₁(-0.1);
+/// assert((w * w.exp() + 0.1).abs() < 1e-16);
+/// ```
+#[allow(non_snake_case)]
+pub fn W₋₁(x: f64) -> f64 { pkg::lambertw(x, -1) }

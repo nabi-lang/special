@@ -1,0 +1,98 @@
+// The two real branches of the Lambert W function, w e^w = x.
+//
+// Near the branch point -1/e both branches are the series in p =
+// sqrt(2 (e x + 1)) of Corless et al. (1996), W = sum mu_k (+-p)^k, its
+// coefficients from their recurrence (40 terms, used for p < 1/2), with
+// x + 1/e formed from 1/e as two doubles. Elsewhere Fritsch's iteration
+// (Fritsch, Shafer and Crowley 1973), quartic, from Winitzki's or the
+// asymptotic first guess; one or two steps reach rounding.
+
+const EPS: f64 = 2.220446049250313e-16;
+// 1/e and e as hi + lo.
+const EM1: (f64, f64) = (0.36787944117144233, -1.2428753672788363e-17);
+const E: f64 = 2.718281828459045;
+
+// mu_0 ..= mu_39.
+const MU: [f64; 40] = [
+    -1.0, 1.0, -0.3333333333333333, 0.1527777777777778,
+    -0.07962962962962963, 0.044502314814814814, -0.02598471487360376, 0.01563563253233392,
+    -0.009616892024299432, 0.006014543252956118, -0.0038112980348919993, 0.0024408779911439826,
+    -0.0015769303446867841, 0.0010262633205076071, -0.0006720616311561362, 0.0004424730618146209,
+    -0.00029267722472962746, 0.00019438727605453933, -0.00012957426685274883, 8.665035805208128e-05,
+    -5.811360750441382e-05, 3.907668486743905e-05, -2.63380647472311e-05, 1.7790345805079586e-05,
+    -1.2040352739559977e-05, 8.163531982496613e-06, -5.544203208567359e-06, 3.7710949611072535e-06,
+    -2.5687050390550955e-06, 1.7520067268263412e-06, -1.1964453089157258e-06, 8.179940565280035e-07,
+    -5.598551881378796e-07, 3.835663851491814e-07, -2.630378619271863e-07, 1.8054472775101644e-07,
+    -1.240275440042247e-07, 8.527035161685828e-08, -5.866863089772259e-08, 4.039473012801556e-08,
+];
+
+fn branch_series(p: f64) -> f64 {
+    let s = 0.0;
+    let k = 40usize;
+    while k > 0 {
+        k -= 1;
+        s = s * p + MU[k];
+    }
+    s
+}
+
+/// Fritsch's iteration for w e^w = x from `w`.
+fn fritsch(x: f64, w: f64) -> f64 {
+    for _ in 0..6 {
+        let z = (x / w).ln() - w;
+        let w1 = 1.0 + w;
+        let q = 2.0 * w1 * (w1 + 2.0 * z / 3.0);
+        let e = z / w1 * (q - z) / (q - 2.0 * z);
+        w *= 1.0 + e;
+        if e.abs() <= EPS { break; }
+    }
+    w
+}
+
+/// The Lambert W function: the `w` with `w e^w = x`, on the real branch
+/// `branch = 0` (the principal one, `x >= -1/e`, `w >= -1`) or `branch =
+/// -1` (`-1/e <= x < 0`, `w <= -1`). The series about the branch point
+/// -1/e (as accurate as the rounding of `x` allows there), Fritsch's
+/// iteration elsewhere: about 1 ulp (2.6e-16 measured). NaN off the real
+/// range of the branch and for any other branch; `W_-1(0) = -inf`.
+/// SciPy: `lambertw(x, k).real`.
+///
+/// ```nabi
+/// let w = special::lambertw(1.0);
+/// assert((w - 0.5671432904097838).abs() < 1e-16);
+/// assert((special::lambertw(-0.1, -1) + 3.577152063957297).abs() < 1e-15);
+/// assert(special::lambertw(-0.36787944117144233) == -1.0);
+/// ```
+pub fn lambertw(x: f64, branch: i32 = 0) -> f64 {
+    if x != x || (branch != 0 && branch != -1) { return f64::NAN; }
+    // e (x + 1/e), carried in two parts.
+    let d = (x + EM1.0) + EM1.1;
+    if d < 0.0 { return if d > -4.0 * EPS { -1.0 } else { f64::NAN }; }
+    let p = (2.0 * E * d).sqrt();
+    if branch == -1 {
+        if x >= 0.0 { return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN }; }
+        if p < 0.5 { return branch_series(-p); }
+        let w = if x > -0.25 {
+            let l1 = (-x).ln();
+            let l2 = (-l1).ln();
+            l1 - l2 + l2 / l1
+        } else {
+            -1.0 - p - p * p / 3.0
+        };
+        return fritsch(x, w);
+    }
+    if x == f64::INFINITY { return x; }
+    if p < 0.5 { return branch_series(p); }
+    if x.abs() < 1e-8 { return x * (1.0 - x * (1.0 - 1.5 * x)); }
+    let w = if x < -0.25 {
+        -1.0 + p - p * p / 3.0
+    } else if x < 3.0 {
+        let l = x.ln_1p();
+        l * (1.0 - (l.ln_1p()) / (2.0 + l))
+    } else {
+        let l1 = x.ln();
+        let l2 = l1.ln();
+        l1 - l2 + l2 / l1
+    };
+    fritsch(x, w)
+}

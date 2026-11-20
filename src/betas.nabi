@@ -1,0 +1,292 @@
+// The beta function and the regularized incomplete beta function with
+// its inverse.
+//
+// I_x(a, b) is the continued fraction of Abramowitz and Stegun 26.5.8,
+// summed bottom up, on the side of the mean where it converges fast (x
+// < (a + 1) / (a + b + 2), else through I_x(a, b) = 1 - I_1-x(b, a)).
+// Its factor x^a (1 - x)^b / B(a, b) is formed as in DiDonato and Morris
+// (1992) for large a and b: about the mean x0 = a / (a + b) with
+// log1pmx and Stirling's corrections, so the large powers cancel before
+// the exponential.
+
+use pkg::gammas::{gamma, lgamma, log1pmx_ratio, stirling};
+use pkg::normal::qnorm;
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+const TINY: f64 = 1e-300;
+
+/// `ln B(a, b) = ln Gamma(a) + ln Gamma(b) - ln Gamma(a + b)` for `a, b
+/// > 0` (NaN otherwise), without the cancellation of the plain sum when
+/// either is large. About 1e-15 relative.
+///
+/// ```nabi
+/// use special::lbeta;
+///
+/// assert((lbeta(2.0, 3.0) - (1.0 / 12.0).ln()).abs() < 1e-15);
+/// assert((lbeta(1e5, 1e5) + 138633.92706134806).abs() < 1e-10);
+/// ```
+pub fn lbeta(a: f64, b: f64) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) { return f64::NAN; }
+    let (p, q) = if a < b { (a, b) } else { (b, a) };
+    if q < 13.0 { return (gamma(p) * (gamma(q) / gamma(p + q))).ln(); }
+    let c = p + q;
+    if p >= 13.0 {
+        let s = stirling(p) + stirling(q) - stirling(c);
+        return 0.9189385332046728 - 0.5 * c.ln() + (p - 0.5) * (p / c).ln() - (q - 0.5) * (p / q).ln_1p() + s;
+    }
+    // p small, q large: ln Gamma(q) - ln Gamma(q + p) by Stirling.
+    let d = -(q - 0.5) * (p / q).ln_1p() - p * c.ln() + p + stirling(q) - stirling(c);
+    lgamma(p) + d
+}
+
+/// The beta function `B(a, b) = Gamma(a) Gamma(b) / Gamma(a + b)`.
+///
+/// ```nabi
+/// use special::beta;
+///
+/// assert((beta(2.0, 3.0) - 1.0 / 12.0).abs() < 1e-17);
+/// ```
+pub fn beta(a: f64, b: f64) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) { return f64::NAN; }
+    if a + b < 171.0 { return gamma(a) * (gamma(b) / gamma(a + b)); }
+    lbeta(a, b).exp()
+}
+
+/// `x^a y^b / B(a, b)` for `x + y = 1`, the factor in front of the
+/// incomplete beta function. The smaller of `x`, `y` is taken as exact
+/// and the larger's log comes from it (`ln_1p`), so `x = 1e-5` does
+/// not lose the digits that `1 - 1e-5` rounds away; for `a, b >= 10`
+/// the large powers cancel about the mean before the exponential
+/// (DiDonato and Morris 1992). NaN outside `a, b > 0`, `0 <= x <= 1`.
+///
+/// ```nabi
+/// // x^2 y^3 / B(2, 3) = 12 x^2 y^3.
+/// assert((special::betainc_factor(2.0, 3.0, 0.25, 0.75) - 12.0 * 0.0625 * 0.421875).abs() < 1e-15);
+/// ```
+pub fn betainc_factor(a: f64, b: f64, x: f64, y: f64) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) || !(x >= 0.0 && y >= 0.0) { return f64::NAN; }
+    beta_prefix(a, b, x, y)
+}
+
+pub(pkg) fn beta_prefix(a: f64, b: f64, x: f64, y: f64) -> f64 {
+    if x == 0.0 || y == 0.0 { return 0.0; }
+    let small_x = x <= y;
+    if a < 10.0 || b < 10.0 {
+        let lx = if small_x { x.ln() } else { (-y).ln_1p() };
+        let ly = if small_x { (-x).ln_1p() } else { y.ln() };
+        return (a * lx + b * ly - lbeta(a, b)).exp();
+    }
+    // x / x0 and y / y0 about the mean x0 = a / (a + b); the linear terms
+    // cancel since a (x / x0 - 1) + b (y / y0 - 1) = 0. The ratio of the
+    // exact one is formed directly, the other from it.
+    let c = a + b;
+    let (tx, ty) = if small_x {
+        let t = x * c / a;
+        (t, 1.0 - (t - 1.0) * (a / b))
+    } else {
+        let t = y * c / b;
+        (1.0 - (t - 1.0) * (b / a), t)
+    };
+    let e = a * log1pmx_ratio(tx) + b * log1pmx_ratio(ty) - (stirling(a) + stirling(b) - stirling(c));
+    (a * b / (2.0 * PI * c)).sqrt() * e.exp()
+}
+
+/// `a I_x(a, b) / prefix = 1 / (1 + d1 / (1 + d2 / (1 + ...)))` with
+/// `d_2m+1 = -(a + m) (a + b + m) x / ((a + 2m) (a + 2m + 1))` and `d_2m =
+/// m (b - m) x / ((a + 2m - 1) (a + 2m))`, cut after `2n` levels and
+/// summed bottom up, `n` doubled until two cuts agree: that loses less to
+/// rounding than the forward evaluations.
+fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
+    let n = 8.0;
+    let r = beta_cf_at(a, b, x, n);
+    while n < 1e6 {
+        n *= 2.0;
+        let t = beta_cf_at(a, b, x, n);
+        if (t - r).abs() <= EPS * t.abs() { return t; }
+        r = t;
+    }
+    r
+}
+
+fn beta_cf_at(a: f64, b: f64, x: f64, n: f64) -> f64 {
+    let t = 1.0;
+    let m = n;
+    while m > 0.0 {
+        // d_2m, then d_2m-1.
+        let c = a + 2.0 * m;
+        t = 1.0 + m * (b - m) * x / ((c - 1.0) * c) / t;
+        m -= 1.0;
+        c = a + 2.0 * m;
+        t = 1.0 - (a + m) * (a + b + m) * x / (c * (c + 1.0)) / t;
+    }
+    1.0 / t
+}
+
+/// `(I_x(a, b), 1 - I_x(a, b))` with `y = 1 - x` passed exactly (so a
+/// tiny `y` keeps its digits), each accurate where it is the smaller.
+/// NaN outside `a, b > 0`, `0 <= x, y`.
+///
+/// ```nabi
+/// let (i, c) = special::betainc_pq(2.0, 3.0, 0.4, 0.6);
+/// assert((i - 0.5248).abs() < 1e-15 && (c - 0.4752).abs() < 1e-15);
+/// ```
+pub fn betainc_pq(a: f64, b: f64, x: f64, y: f64) -> (f64, f64) {
+    if !(a > 0.0) || !(b > 0.0) || !(x >= 0.0 && y >= 0.0) { return (f64::NAN, f64::NAN); }
+    ibeta(a, b, x, y)
+}
+
+pub(pkg) fn ibeta(a: f64, b: f64, x: f64, y: f64) -> (f64, f64) {
+    if x <= 0.0 { return (0.0, 1.0); }
+    if y <= 0.0 { return (1.0, 0.0); }
+    if x * (a + b + 2.0) < a + 1.0 {
+        let w = beta_prefix(a, b, x, y) * beta_cf(a, b, x) / a;
+        return (w, 1.0 - w);
+    }
+    let w = beta_prefix(b, a, y, x) * beta_cf(b, a, y) / b;
+    (1.0 - w, w)
+}
+
+/// The regularized incomplete beta function `I_x(a, b)`, `a, b > 0`, `0
+/// <= x <= 1` (NaN otherwise); the CDF of Beta(a, b). Relative error
+/// about 1e-14 for parameters up to 1e5. SciPy: `betainc`.
+///
+/// ```nabi
+/// use special::betainc;
+///
+/// assert((betainc(2.0, 3.0, 0.4) - 0.5248).abs() < 1e-15);
+/// assert(betainc(1.0, 1.0, 0.25) == 0.25);
+/// ```
+pub fn betainc(a: f64, b: f64, x: f64) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) || !(x >= 0.0 && x <= 1.0) { return f64::NAN; }
+    ibeta(a, b, x, 1.0 - x).0
+}
+
+/// `1 - I_x(a, b)`, accurate where it is small. SciPy: `betaincc`.
+///
+/// ```nabi
+/// use special::{betainc, betaincc};
+///
+/// assert((betaincc(2.0, 3.0, 0.4) - (1.0 - betainc(2.0, 3.0, 0.4))).abs() < 1e-15);
+/// ```
+pub fn betaincc(a: f64, b: f64, x: f64) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) || !(x >= 0.0 && x <= 1.0) { return f64::NAN; }
+    ibeta(a, b, x, 1.0 - x).1
+}
+
+/// `x` with `I_x(a, b) = p` (`lower`) or `1 - I_x(a, b) = p`: a first
+/// guess from Abramowitz and Stegun 26.5.22 for a, b >= 1, else from the
+/// leading term of the tail p falls in, then Halley's method kept inside
+/// a bracket and, above 1/2, a step to the best neighbouring double.
+pub(pkg) fn beta_inv(a: f64, b: f64, p: f64, lower: bool) -> f64 {
+    if !(a > 0.0) || !(b > 0.0) || !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+    let (pl, pu) = if lower { (p, 1.0 - p) } else { (1.0 - p, p) };
+    if pl == 0.0 { return 0.0; }
+    if pu == 0.0 { return 1.0; }
+    // Near 1 solve for 1 - x instead, I_(1-x)(b, a) = 1 - p, so its
+    // relative accuracy is not lost to the spacing of doubles below 1.
+    if pu < pl && lower { return 1.0 - beta_inv(b, a, pu, true); }
+    if pl < pu && !lower { return 1.0 - beta_inv(b, a, pl, false); }
+    let x = 0.5;
+    if a >= 1.0 && b >= 1.0 {
+        // y_p is the upper p-quantile of the normal distribution.
+        let y = -qnorm(pl, pu);
+        let (ra, rb) = (1.0 / (2.0 * a - 1.0), 1.0 / (2.0 * b - 1.0));
+        let h = 2.0 / (ra + rb);
+        let lam = (y * y - 3.0) / 6.0;
+        let w = y * (h + lam).sqrt() / h - (rb - ra) * (lam + 5.0 / 6.0 - 2.0 / (3.0 * h));
+        x = a / (a + b * (2.0 * w).exp());
+    } else {
+        // I_x ~ x^a / (a B) near 0 and 1 - I_x ~ (1 - x)^b / (b B) near 1;
+        // take the one whose root lies on its own side of the mean.
+        let lb = lbeta(a, b);
+        let lo = ((pl.ln() + a.ln() + lb) / a).exp();
+        let hi = 1.0 - ((pu.ln() + b.ln() + lb) / b).exp();
+        let mean = a / (a + b);
+        x = if lo <= mean { lo } else if hi >= mean { hi } else { mean };
+    }
+    if !(x > 0.0 && x < 1.0) { x = 0.5; }
+    let afac = -lbeta(a, b);
+    let (lo, hi) = (0.0, 1.0);
+    for _ in 0..200 {
+        let y = 1.0 - x;
+        let (i, ic) = ibeta(a, b, x, y);
+        let f = if pl <= pu { i - pl } else { pu - ic };
+        if f == 0.0 { return x; }
+        if f > 0.0 { hi = x; } else { lo = x; }
+        let dens = ((a - 1.0) * x.ln() + (b - 1.0) * y.ln() + afac).exp();
+        let nx = 0.5 * (lo + hi);
+        if dens > 0.0 && dens.is_finite() {
+            let u = f / dens;
+            let g = (a - 1.0) / x - (b - 1.0) / y;
+            let t = x - u / (1.0 - 0.5 * (u * g).clamp(-1.0, 1.0));
+            if t > lo && t < hi { nx = t; }
+        }
+        let done = (nx - x).abs() <= 4.0 * EPS * nx.abs().max(TINY) || hi - lo <= 4.0 * EPS * hi;
+        x = nx;
+        if done { break; }
+    }
+    if x > 0.5 { polish(a, b, pl, pu, x) } else { x }
+}
+
+/// Moves `x` to a neighbouring double while that brings `I_x` (or `1 -
+/// I_x` for the upper tail) nearer the target: above 1/2 the doubles are
+/// coarse next to `1 - x`, and the iteration can stop a few of them from
+/// the best one.
+fn polish(a: f64, b: f64, pl: f64, pu: f64, x: f64) -> f64 {
+    let miss = |t: f64| -> f64 {
+        if !(t > 0.0 && t < 1.0) { return f64::INFINITY; }
+        let (i, ic) = ibeta(a, b, t, 1.0 - t);
+        if pl <= pu { (i - pl).abs() } else { (ic - pu).abs() }
+    };
+    let e = miss(x);
+    for _ in 0..16 {
+        let (up, dn) = (x.next_up(), x.next_down());
+        let (eu, ed) = (miss(up), miss(dn));
+        if eu < e && eu <= ed {
+            x = up;
+            e = eu;
+        } else if ed < e {
+            x = dn;
+            e = ed;
+        } else {
+            break;
+        }
+    }
+    x
+}
+
+/// The inverse of `betainc` in `x`: `I_x(a, b) = p`. About 1e-15
+/// relative. SciPy: `betaincinv`.
+///
+/// ```nabi
+/// use special::{betainc, betaincinv};
+///
+/// let x = betaincinv(2.0, 5.0, 0.3);
+/// assert((betainc(2.0, 5.0, x) - 0.3).abs() < 1e-15);
+/// ```
+pub fn betaincinv(a: f64, b: f64, p: f64) -> f64 { beta_inv(a, b, p, true) }
+
+/// The inverse of `betaincc` in `x`: `1 - I_x(a, b) = q`, accurate for
+/// tiny `q`. SciPy: `betainccinv`.
+///
+/// ```nabi
+/// use special::{betaincc, betainccinv};
+///
+/// let x = betainccinv(2.0, 5.0, 1e-12);
+/// // x is 0.99722: one ulp of x moves the tail by 2e-13 of itself.
+/// assert(((betaincc(2.0, 5.0, x) - 1e-12) / 1e-12).abs() < 1e-11);
+/// ```
+pub fn betainccinv(a: f64, b: f64, q: f64) -> f64 { beta_inv(a, b, q, false) }
+
+/// `ln C(n, k)`, the log of the binomial coefficient, for real `n >= k
+/// >= 0` (through `lbeta`, so no overflow at `n = 1e300`). See
+/// `comb` for the value and `comb_exact` for the exact integer.
+///
+/// ```nabi
+/// assert((special::lcomb(10.0, 3.0) - 120f64.ln()).abs() < 1e-14);
+/// ```
+pub fn lcomb(n: f64, k: f64) -> f64 {
+    if k == 0.0 || k == n { return 0.0; }
+    -(n + 1.0).ln() - lbeta(n - k + 1.0, k + 1.0)
+}

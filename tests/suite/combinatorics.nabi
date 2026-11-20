@@ -1,0 +1,102 @@
+// Factorials and binomial coefficients: exact integers against Python's
+// math.comb / math.perm / math.factorial digits, the f64 forms against
+// mpmath (binomial, rf, factorial, fac2 at 40 digits).
+
+use pkg::tests::suite::{expect, rel};
+
+const BINOM: [[f64; 3]; 13] = [
+    [5.0, 2.0, 10.0],
+    [0.5, 2.0, -0.125],
+    [-1.0, 3.0, -1.0],
+    [10.5, 3.25, 171.46113614249876],
+    [100.0, 50.0, 1.008913445455642e+29],
+    [1000.0, 500.0, 2.7028824094543655e+299],
+    [10000000000.0, 3.0, 1.6666666661666667e+29],
+    [-2.5, 4.0, 9.0234375],
+    [7.0, -1.5, -0.011918253062834741],
+    [3.0, 5.0, 0.0],
+    [2.5, -1.0, 0.0],
+    [50.25, 0.75, 20.573992405362837],
+    [100000.0, 10000.0, f64::INFINITY],
+];
+const POCH: [[f64; 3]; 10] = [
+    [3.0, 4.0, 360.0],
+    [-3.0, 2.0, 6.0],
+    [0.5, 0.5, 0.5641895835477563],
+    [2.5, -1.5, 0.7522527780636751],
+    [10.0, 0.25, 1.7615536782946892],
+    [-2.5, 3.0, -1.875],
+    [1e-05, 2.0, 1.0000100000000001e-05],
+    [100.0, 50.0, 4.081299792895145e+104],
+    [-0.5, -2.0, 0.26666666666666666],
+    [0.1, 7.3, 162.01555101592442],
+];
+
+#[test]
+fn exact_integers() {
+    expect(pkg::factorial_exact(0) == 1 && pkg::factorial_exact(1) == 1, "0! and 1!");
+    expect(pkg::factorial_exact(30) == 265252859812191058636308480000000, "30!");
+    // 1000! has 2568 digits and ends in 249 zeros.
+    let s = f"{pkg::factorial_exact(1000)}";
+    expect(s.len() == 2568 && s.ends_with("0".repeat(249)) && !s.ends_with("0".repeat(250)), "1000!");
+    expect(pkg::comb_exact(10, 0) == 1 && pkg::comb_exact(10, 10) == 1 && pkg::comb_exact(3, 4) == 0, "comb ends");
+    expect(pkg::comb_exact(200, 100) == 90548514656103281165404177077484163874504589675413336841320, "C(200, 100)");
+    expect(pkg::perm_exact(20, 20) == pkg::factorial_exact(20) && pkg::perm_exact(5, 6) == 0, "perm");
+    expect(pkg::factorial2_exact(0) == 1 && pkg::factorial2_exact(1) == 1 && pkg::factorial2_exact(20) == 3715891200, "n!!");
+    // (2n)!! = 2^n n!, (2n - 1)!! = (2n)! / (2^n n!).
+    for n in [5u64, 17u64, 60u64] {
+        let two: int = 2;
+        expect(pkg::factorial2_exact(2u64 * n) == two.pow(n as u32) * pkg::factorial_exact(n), f"(2n)!! at {n}");
+        expect(pkg::factorial2_exact(2u64 * n - 1u64) * two.pow(n as u32) * pkg::factorial_exact(n) == pkg::factorial_exact(2u64 * n), f"(2n - 1)!! at {n}");
+    }
+    expect(pkg::stirling2(0, 0) == 1 && pkg::stirling2(4, 0) == 0 && pkg::stirling2(20, 7) == 11143554045652, "S(n, k)");
+    // Pascal's rule and the row sums.
+    for n in [7u64, 33u64, 120u64] {
+        let row: int = 0;
+        for k in 0u64..n + 1u64 {
+            row = row + pkg::comb_exact(n, k);
+            if k > 0u64 { expect(pkg::comb_exact(n + 1u64, k) == pkg::comb_exact(n, k) + pkg::comb_exact(n, k - 1u64), "Pascal"); }
+        }
+        let two: int = 2;
+        expect(row == two.pow(n as u32), f"row sum at {n}");
+    }
+}
+
+#[test]
+fn float_forms() {
+    expect(pkg::factorial(0) == 1.0 && pkg::factorial(22) == 1124000727777607680000.0, "small n!");
+    rel(pkg::factorial(25), 1.5511210043330986e+25, 0.0, "25!");
+    rel(pkg::factorial(99), 9.332621544394415e+155, 0.0, "99!");
+    rel(pkg::factorial(170), 7.257415615307999e+306, 0.0, "170!");
+    expect(pkg::factorial(171) == f64::INFINITY, "171! overflows");
+    rel(pkg::factorial2(299), 3.753274111571926e+306, 0.0, "299!!");
+    rel(pkg::factorial2(300), 8.154414069380594e+307, 0.0, "300!!");
+    expect(pkg::factorial2(301) == f64::INFINITY && pkg::factorial2(-2) != pkg::factorial2(-2), "n!! ends");
+    rel(pkg::lfactorial(1000), 5912.128178488163, 2.3e-16, "ln 1000!");
+    // Correctly rounded: the exact integer rounded once.
+    rel(pkg::comb(60, 30), 1.1826458156486142e+17, 0.0, "C(60, 30)");
+    rel(pkg::comb(100, 50), 1.008913445455642e+29, 0.0, "C(100, 50)");
+    rel(pkg::comb(1000, 500), 2.7028824094543655e+299, 0.0, "C(1000, 500)");
+    rel(pkg::comb(1029, 514), 1.429820686498904e+308, 0.0, "C(1029, 514)");
+    rel(pkg::comb(2000, 10), 2.7589878594600562e+26, 0.0, "C(2000, 10)");
+    rel(pkg::comb(1000000, 3), 1.66666166667e+17, 0.0, "C(1e6, 3)");
+    expect(pkg::comb(100000, 5000) == f64::INFINITY && pkg::comb(3, 7) == 0.0, "comb ends");
+    for n in 0u64..60u64 {
+        for k in 0u64..n + 1u64 { expect(pkg::comb(n, k) == pkg::comb_exact(n, k).to_f64(), f"C({n}, {k})"); }
+    }
+    expect(pkg::perm(10, 3) == 720.0 && pkg::perm(3, 4) == 0.0, "perm");
+    rel(pkg::perm(200, 100), pkg::perm_exact(200, 100).to_f64(), 0.0, "P(200, 100)");
+    expect(pkg::multicomb(3, 2) == 6.0 && pkg::multicomb(0, 0) == 1.0 && pkg::multicomb(0, 2) == 0.0, "multicomb");
+}
+
+#[test]
+fn real_arguments() {
+    for r in BINOM { rel(pkg::binom(r[0], r[1]), r[2], 4e-15, f"binom({r[0]}, {r[1]})"); }
+    for r in POCH { rel(pkg::poch(r[0], r[1]), r[2], 4e-15, f"poch({r[0]}, {r[1]})"); }
+    expect(pkg::binom(f64::NAN, 1.0) != pkg::binom(f64::NAN, 1.0) && pkg::poch(1.0, f64::NAN) != pkg::poch(1.0, f64::NAN), "NaN");
+    // binom agrees with comb at the integers, poch with the gamma ratio.
+    for n in [4.0, 13.0, 40.0] {
+        for k in [0.0, 1.0, 3.0, n] { rel(pkg::binom(n, k), pkg::comb(n as u64, k as u64), 4e-15, f"binom = comb at {n}, {k}"); }
+    }
+    for x in [0.3, 2.0, 7.5] { rel(pkg::poch(x, 2.5), pkg::gamma(x + 2.5) / pkg::gamma(x), 4e-15, f"poch = Gamma ratio at {x}"); }
+}

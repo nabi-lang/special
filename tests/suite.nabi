@@ -1,0 +1,36 @@
+// Tests: every function against mpmath at 40 digits (the values
+// rounded to the nearest double), identities (reflection, recurrence,
+// Wronskians), and edge cases (poles, overflow, NaN). Each file names
+// its sources.
+
+mod bessel;
+mod classic;
+mod combinatorics;
+mod complex;
+mod elementary;
+mod elliptic;
+mod expint;
+mod faddeeva;
+mod legendre;
+mod logistic;
+mod orthopoly;
+mod zeta;
+
+pub const EPS: f64 = 2.220446049250313e-16;
+
+pub fn expect(ok: bool, what: str) {
+    if !ok { panic(f"check failed: {what}"); }
+}
+
+/// `|a - b| <= tol`.
+pub fn close(a: f64, b: f64, tol: f64, what: str) {
+    if !((a - b).abs() <= tol) { panic(f"check failed: {what}: {a} vs {b} (tol {tol})"); }
+}
+
+/// `|a - b| <= tol |b|` (or both NaN, or equal infinities).
+pub fn rel(a: f64, b: f64, tol: f64, what: str) {
+    if a != a && b != b { return; }
+    if a == b { return; }
+    if b.is_infinite() || a.is_infinite() { panic(f"check failed: {what}: {a} vs {b}"); }
+    if !((a - b).abs() <= tol * b.abs()) { panic(f"check failed: {what}: {a} vs {b} (rel {(a - b).abs() / b.abs()}, tol {tol})"); }
+}

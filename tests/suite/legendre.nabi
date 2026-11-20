@@ -1,0 +1,122 @@
+// Associated Legendre functions and spherical harmonics against
+// mpmath (40 digits): legenp for real degrees, the Condon-Shortley
+// recurrence at 80 digits for integer degrees up to 1000 (where
+// legenp's hypercomb does not converge) and for the spherical
+// harmonics, checked against spherharm at low degree. Plus the
+// orthonormality of Y_n^m by Gauss-Legendre quadrature in cos theta and
+// the addition theorem.
+
+use pkg::tests::suite::{close, expect, rel};
+
+const PLM: [[f64; 4]; 15] = [
+    [0.0, 0.0, 0.3, 1.0],
+    [1.0, 0.0, -0.7, -0.7],
+    [2.0, 1.0, 0.6, -1.44],
+    [3.0, 2.0, 0.25, 3.515625],
+    [5.0, -2.0, 0.4, -0.01092],
+    [10.0, 3.0, -0.9, 463.99052344052336],
+    [20.0, 0.0, 0.99, -0.22538058762918778],
+    [30.0, 15.0, 0.1, 6.888143558227705e+20],
+    [50.0, -7.0, 0.77, 3.232882589443515e-14],
+    [100.0, 50.0, 0.5, -8.225262033972738e+97],
+    [200.0, 0.0, -0.123, 0.051908267867458766],
+    [500.0, 100.0, 0.9, 1.2286343976052444e+268],
+    [1000.0, 1.0, 0.3, -2.8467903853922274],
+    [150.0, 150.0, 0.2, 1.756923133361011e+305],
+    [300.0, 250.0, 0.999, 2.7192026205181954e+300],
+];
+const LPMV: [[f64; 4]; 13] = [
+    [0.0, 0.5, 0.3, 0.7009385309696551],
+    [0.0, 2.5, -0.6, 0.4705051900388265],
+    [1.0, 0.3, 0.8, -0.12739359986006885],
+    [2.0, 3.7, -0.2, -6.564751600536678],
+    [0.0, -0.5, 0.4, 1.0910959103627815],
+    [1.0, 1.5, -0.85, 1.4304250998593078],
+    [3.0, 7.25, 0.5, 137.58810732325693],
+    [-1.0, 0.5, 0.3, 0.6291152304793952],
+    [-2.0, 4.5, -0.5, 0.017024378397195877],
+    [0.0, 12.3, 0.9, 0.08520758437426776],
+    [2.0, -3.4, 0.1, 3.501316947815222],
+    [0.0, 0.5, -0.99, -1.2869602643036353],
+    [1.0, 19.5, 0.2, -3.5887628508588088],
+];
+const SPH: [[f64; 6]; 10] = [
+    [0.0, 0.0, 1.3, 0.0, 0.28209479177387814, 0.0],
+    [1.0, 1.0, 0.5, 0.7, -0.12668747990560436, -0.10670739227464042],
+    [2.0, -1.0, 1.1, 2.0, -0.12996319938623022, -0.283974771415918],
+    [5.0, 3.0, 0.3, -1.2, 0.05775893980319845, -0.028502115152079226],
+    [10.0, -7.0, 2.5, 0.4, 0.18404162959712436, 0.06543228958747366],
+    [40.0, 20.0, 1.0, 0.3, 0.24595420205393165, -0.07157419559478975],
+    [100.0, 0.0, 0.01, 0.0, 3.051521549090295, 0.0],
+    [300.0, 150.0, 1.5, 0.9, 0.3114841860422469, -0.027633555286643192],
+    [1000.0, 999.0, 0.7, 0.1, -7.789737973223798e-190, 5.691133034387843e-190],
+    [2000.0, 10.0, 3.0, 0.0, -0.8435582201843348, 0.0],
+];
+
+#[test]
+fn legendre_values() {
+    for r in PLM {
+        let n = r[0] as u32;
+        rel(pkg::assoc_legendre_p(n, r[1] as i32, r[2]), r[3], 4.0 * (n as f64 + 1.0) * 2.3e-16, f"P_{n}^{r[1]}({r[2]})");
+    }
+    for r in LPMV { rel(pkg::lpmv(r[0] as i32, r[1], r[2]), r[3], 3e-14, f"P_{r[1]}^{r[0]}({r[2]})"); }
+    // P_n(1) = 1, P_n(-1) = (-1)^n, P_n^m(+-1) = 0 for m > 0.
+    for n in [0u32, 1, 7, 40] {
+        expect(pkg::assoc_legendre_p(n, 0, 1.0) == 1.0, f"P_{n}(1)");
+        expect(pkg::assoc_legendre_p(n, 0, -1.0) == (if n % 2 == 0 { 1.0 } else { -1.0 }), f"P_{n}(-1)");
+        if n > 0 { expect(pkg::assoc_legendre_p(n, 1, 1.0) == 0.0, f"P_{n}^1(1)"); }
+    }
+    expect(pkg::assoc_legendre_p(3, 4, 0.2) == 0.0 && pkg::assoc_legendre_p(3, -4, 0.2) == 0.0, "|m| > n");
+    expect(pkg::assoc_legendre_p(3, 1, 1.5) != pkg::assoc_legendre_p(3, 1, 1.5), "|x| > 1 is NaN");
+    expect(pkg::lpmv(0, 0.5, -1.0) != pkg::lpmv(0, 0.5, -1.0), "singular at -1");
+    expect(pkg::lpmv(1, f64::NAN, 0.5) != pkg::lpmv(1, f64::NAN, 0.5), "nan");
+    // P_-v-1 = P_v.
+    rel(pkg::lpmv(1, -1.7, 0.4), pkg::lpmv(1, 0.7, 0.4), 1e-15, "degree reflection");
+    // The recurrence in the degree, (v - m + 1) P_(v+1) = (2v + 1) x P_v -
+    // (v + m) P_(v-1), across the switch from the series at degree 2.
+    let (v, x) = (1.3, 0.35);
+    let lhs = v * pkg::lpmv(1, v + 1.0, x);
+    let rhs = (2.0 * v + 1.0) * x * pkg::lpmv(1, v, x) - (v + 1.0) * pkg::lpmv(1, v - 1.0, x);
+    close(lhs, rhs, 1e-14, "degree recurrence");
+}
+
+#[test]
+fn harmonic_values() {
+    for r in SPH {
+        let n = r[0] as u32;
+        let y = pkg::sph_harm(n, r[1] as i32, r[2], r[3]);
+        // Near a pole the rounding of cos theta costs about n^2 eps.
+        let np = n as f64 + 1.0;
+        let f = if r[2] < 0.1 || r[2] > 3.04 { np * np } else { np };
+        let tol = f * 4e-16 * r[4].hypot(r[5]);
+        close(y.re, r[4], tol, f"Re Y_{n}^{r[1]}");
+        close(y.im, r[5], tol, f"Im Y_{n}^{r[1]}");
+    }
+    // Y_n^-m = (-1)^m conj(Y_n^m).
+    let a = pkg::sph_harm(6, 3, 0.8, 1.1);
+    let b = pkg::sph_harm(6, -3, 0.8, 1.1);
+    close(b.re, -a.re, 1e-16, "conjugate re");
+    close(b.im, a.im, 1e-16, "conjugate im");
+    // Orthonormal: integral of P~_n^m P~_l^m over cos theta is delta / (2 pi);
+    // Gauss-Legendre with 40 nodes is exact for these degrees.
+    let (xs, ws) = try! pkg::roots_legendre(40);
+    for (n, l, m) in [(3u32, 3u32, 1i32), (5, 3, 1), (12, 12, 7), (20, 18, 0)] {
+        let s = 0.0;
+        for i in 0..40usize {
+            let t = xs[i].acos();
+            s += ws[i] * pkg::sph_legendre_p(n, m, t) * pkg::sph_legendre_p(l, m, t);
+        }
+        close(2.0 * 3.141592653589793 * s, if n == l { 1.0 } else { 0.0 }, 1e-14, f"orthonormal {n} {l} {m}");
+    }
+    // Addition theorem: sum_m |Y_n^m|^2 = (2n + 1) / (4 pi).
+    for n in [4u32, 25, 300] {
+        let s = 0.0;
+        for m in -(n as i32)..(n as i32) + 1 {
+            let y = pkg::sph_harm(n, m, 1.234, 0.5);
+            s += y.re * y.re + y.im * y.im;
+        }
+        rel(s, (2.0 * n as f64 + 1.0) / (4.0 * 3.141592653589793), 1e-13, f"addition theorem at {n}");
+    }
+    // High degree at the pole and near it: no overflow, no NaN.
+    expect(pkg::sph_legendre_p(10000, 5000, 1e-3) == 0.0 && pkg::sph_legendre_p(10000, 0, 0.0).is_finite(), "high degree");
+}

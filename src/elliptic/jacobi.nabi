@@ -1,0 +1,98 @@
+// Jacobi's elliptic functions by the descending Landen transformation
+// (the arithmetic-geometric mean, A&S 16.4, as in Cephes' ellpj): the
+// amplitude is found at the end of the AGM chain and carried back up.
+// m below 1e-9 takes the first-order series in m (A&S 16.13), m = 1 the
+// hyperbolic limits; m < 0 and m > 1 the imaginary-modulus and
+// reciprocal-parameter transformations (A&S 16.10, 16.11).
+
+use pkg::elliptic::legendre::ellipk;
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `(sn, cn, dn, am)` for `0 <= m <= 1`.
+fn landen(u: f64, m: f64) -> (f64, f64, f64, f64) {
+    if m < 1e-9 {
+        let t = u.sin();
+        let b = u.cos();
+        let ai = 0.25 * m * (u - t * b);
+        return (t - ai * b, b + ai * t, 1.0 - 0.5 * m * t * t, u - ai);
+    }
+    if m == 1.0 {
+        let c = 1.0 / u.cosh();
+        return (u.tanh(), c, c, u.sinh().atan());
+    }
+    // r[i] = c_i / a_i along the AGM chain; quadratic, so 16 steps reach
+    // any m < 1.
+    let r: [f64; 16] = [0.0; 16];
+    let a = 1.0;
+    let b = (1.0 - m).sqrt();
+    let twon = 1.0;
+    let i = 0usize;
+    r[0] = m.sqrt();
+    while r[i].abs() > EPS && i < 15 {
+        let c = 0.5 * (a - b);
+        let t = (a * b).sqrt();
+        a = 0.5 * (a + b);
+        b = t;
+        i += 1;
+        r[i] = c / a;
+        twon *= 2.0;
+    }
+    let phi = twon * a * u;
+    while i > 0 {
+        phi = 0.5 * ((r[i] * phi.sin()).asin() + phi);
+        i -= 1;
+    }
+    // dn = sqrt(1 - m sn^2) as sqrt((1 - m) + m cn^2): no cancellation.
+    let cp = phi.cos();
+    (phi.sin(), cp, ((1.0 - m) + m * cp * cp).sqrt(), phi)
+}
+
+/// The Jacobi elliptic functions `(sn(u | m), cn(u | m), dn(u | m),
+/// am(u | m))` in the parameter `m = k^2`, with `sn = sin am`, `cn = cos
+/// am` and `dn = sqrt(1 - m sn^2)`. For `0 <= m <= 1` the descending
+/// Landen transformation (Cephes' `ellpj`; within about 4e-16 absolute of
+/// mpmath for `|u| <= 10`, growing like `|u| eps` past it as the
+/// amplitude does); `m < 0` by `sn(u | m) = sd(u sqrt(1 - m) | m / (m -
+/// 1)) / sqrt(1 - m)` and `m > 1` by `sn(u | m) = sn(u sqrt(m) | 1 / m) /
+/// sqrt(m)`. For `m > 1` the amplitude is not monotonic and `am` is the
+/// angle of `(cn, sn)` in `(-pi, pi]`. NaN for NaN input. SciPy:
+/// `ellipj`, which gives NaN outside `0 <= m <= 1`.
+///
+/// ```nabi
+/// let (sn, cn, dn, am) = special::ellipj(0.5, 0.3);
+/// assert((sn - 0.4742156227118206).abs() < 4e-16);
+/// assert((sn * sn + cn * cn - 1.0).abs() < 4e-16 && (dn * dn + 0.3 * sn * sn - 1.0).abs() < 4e-16);
+/// assert(am.sin() == sn);
+/// ```
+pub fn ellipj(u: f64, m: f64) -> (f64, f64, f64, f64) {
+    let nan = f64::NAN;
+    if u != u || m != m { return (nan, nan, nan, nan); }
+    if m >= 0.0 && m <= 1.0 {
+        if u.is_infinite() { return if m == 1.0 { (u.signum(), 0.0, 0.0, u.signum() * 0.5 * PI) } else { (nan, nan, nan, nan) }; }
+        return landen(u, m);
+    }
+    if u.is_infinite() || m.is_infinite() { return (nan, nan, nan, nan); }
+    if m < 0.0 {
+        // A&S 16.10 with mu = -m / (1 - m), v = u sqrt(1 - m).
+        let q = 1.0 - m;
+        let mu = -m / q;
+        let sq = q.sqrt();
+        let (s, c, d, _) = ellipj(u * sq, mu);
+        let sn = s / (d * sq);
+        let cn = c / d;
+        // am is monotonic in u: unwrap the angle of (cn, sn) by the
+        // half-periods 2K(m) of u.
+        let k = ellipk(m);
+        let j = (u / (2.0 * k)).round();
+        let base = sn.atan2(cn);
+        let am = base + 2.0 * PI * ((j * PI - base) / (2.0 * PI)).round();
+        return (sn, cn, 1.0 / d, am);
+    }
+    // A&S 16.11: m > 1.
+    let sm = m.sqrt();
+    let (s, c, d, _) = ellipj(u * sm, 1.0 / m);
+    let sn = s / sm;
+    (sn, d, c, sn.atan2(d))
+}

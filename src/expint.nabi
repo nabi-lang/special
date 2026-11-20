@@ -1,0 +1,293 @@
+// The exponential integrals E1, Ei and E_n and the sine, cosine,
+// hyperbolic sine and cosine integrals.
+//
+// Small arguments use the power series; those of Ei, Chi and Ci are
+// written about their positive zero x0 (kept as two doubles), Ei(x) =
+// ln(x / x0) + sum (x^k - x0^k) / (k k!), whose terms then share one
+// sign, so the zero keeps full relative accuracy. E1 and E_n past the
+// series range use the even part of the continued fraction DLMF
+// 8.19.17, Si and Ci past 2 the same for E1(ix), both summed bottom up,
+// Ei past 40 its asymptotic series.
+
+use pkg::complex::cx;
+use pkg::gammas::digamma;
+
+const EULER: f64 = 0.5772156649015329;
+const HALF_PI: f64 = 1.5707963267948966;
+const EPS: f64 = 2.220446049250313e-16;
+// The positive zeros of Ei, Chi and Ci as hi + lo.
+const EI0: (f64, f64) = (0.3725074107813666, 1.3140183414386028e-17);
+const CHI0: (f64, f64) = (0.5238225713898644, -2.6671382575502846e-17);
+const CI0: (f64, f64) = (0.6165054856207163, -4.209920321433186e-17);
+
+/// `ln(x / x0) + sum_k sgn^k (u^k - u0^k) / (k p k!)` over u = x^p: the
+/// series of Ei (p = 1), Chi (p = 2, sgn = 1) and Ci (p = 2, sgn = -1)
+/// about their zero x0, `d_k = u^k - u0^k` by `d_k = u d_(k-1) + u0^(k-1)
+/// (u - u0)`.
+fn about_zero(x: f64, x0: (f64, f64), p: f64, sgn: f64) -> f64 {
+    let h = (x - x0.0) - x0.1;
+    let r = x0.0 + x0.1;
+    let u = if p == 1.0 { x } else { x * x };
+    let u0 = if p == 1.0 { r } else { r * r };
+    // u - u0 without its cancellation.
+    let du = if p == 1.0 { h } else { h * (x + r) };
+    // ln(x / x0): through ln_1p near the zero, directly far from it,
+    // where 1 + h / r would round away the digits of a small x.
+    let s = if (h / r).abs() < 0.5 { (h / r).ln_1p() } else { (x / x0.0).ln() - x0.1 / x0.0 };
+    let d = du;
+    let pw = 1.0;
+    let f = 1.0;
+    let k = 1.0;
+    while k < 500.0 {
+        // f = (p k)!, sign^k.
+        f *= if p == 1.0 { k } else { (2.0 * k - 1.0) * (2.0 * k) };
+        let t = d / (p * k * f);
+        let neg = sgn < 0.0 && k % 2.0 == 1.0;
+        s += if neg { -t } else { t };
+        if t.abs() <= 0.25 * EPS * s.abs() { break; }
+        pw *= u0;
+        d = u * d + pw * du;
+        k += 1.0;
+    }
+    s
+}
+
+/// E_n(x) for x > 0.8 by the even part of DLMF 8.19.17, e^-x / (x + n -
+/// n / (x + n + 2 - 2 (n + 1) / (x + n + 4 - ...))), summed bottom up
+/// from a depth of 90 / x + 10; the forward (Lentz) evaluation drifts by
+/// 1e-15 near x = 1.
+fn en_cf(n: f64, x: f64) -> f64 {
+    let k = (90.0 / x).floor() + 10.0;
+    let t = x + n + 2.0 * k;
+    while k > 0.0 {
+        t = x + n + 2.0 * (k - 1.0) - k * (n + k - 1.0) / t;
+        k -= 1.0;
+    }
+    (-x).exp() / t
+}
+
+/// The exponential integral `E1(x) = int_x^inf e^-t / t dt`, `x > 0`
+/// (`inf` at 0, NaN below: there it is complex, `-Ei(-x) - i pi`). The
+/// series to 0.8, the continued fraction above; about 3 ulp (7.2e-16
+/// measured). SciPy: `exp1`.
+///
+/// ```nabi
+/// assert((special::e1(1.0) - 0.21938393439552028).abs() < 1e-16);
+/// assert(special::e1(0.0) == f64::INFINITY);
+/// ```
+pub fn e1(x: f64) -> f64 {
+    if x != x || x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::INFINITY; }
+    if x > 0.8 { return en_cf(1.0, x); }
+    // -euler - ln x + sum (-1)^(k+1) x^k / (k k!).
+    let s = 0.0;
+    let t = 1.0;
+    let k = 1.0;
+    while k < 100.0 {
+        t *= -x / k;
+        let u = -t / k;
+        s += u;
+        if u.abs() <= 0.25 * EPS * s.abs() { break; }
+        k += 1.0;
+    }
+    (-EULER - x.ln()) + s
+}
+
+/// `e^x / x` without overflowing before the quotient does.
+fn exp_over(x: f64) -> f64 {
+    let h = (0.5 * x).exp();
+    h * (h / x)
+}
+
+/// The exponential integral `Ei(x) = -PV int_-x^inf e^-t / t dt`: the
+/// series about its zero 0.37250741... below 2 (full relative accuracy
+/// at the zero), the plain series to 40, the asymptotic series above; `-E1(-x)` for `x < 0`.
+/// About 4 ulp (9e-16 measured); `-inf` at 0, `inf` past 716.4. SciPy:
+/// `expi`.
+///
+/// ```nabi
+/// assert((special::ei(1.0) - 1.8951178163559368).abs() < 3e-16);
+/// assert(special::ei(-1.0) == -special::e1(1.0));
+/// ```
+pub fn ei(x: f64) -> f64 {
+    if x != x { return x; }
+    if x < 0.0 { return -e1(-x); }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x < 2.0 { return about_zero(x, EI0, 1.0, 1.0); }
+    if x < 40.0 {
+        // euler + ln x + sum x^k / (k k!), every term positive.
+        let s = 0.0;
+        let t = 1.0;
+        let k = 1.0;
+        while k < 300.0 {
+            t *= x / k;
+            let u = t / k;
+            s += u;
+            if u <= 0.25 * EPS * s { break; }
+            k += 1.0;
+        }
+        return s + (EULER + x.ln());
+    }
+    if x > 716.5 { return f64::INFINITY; }
+    // e^x / x sum k! / x^k, stopped at its smallest term.
+    let s = 1.0;
+    let t = 1.0;
+    let k = 1.0;
+    while k < x {
+        let nt = t * k / x;
+        if nt > t { break; }
+        t = nt;
+        s += t;
+        if t <= 0.25 * EPS * s { break; }
+        k += 1.0;
+    }
+    exp_over(x) * s
+}
+
+/// The generalized exponential integral `E_n(x) = int_1^inf e^-xt / t^n
+/// dt` for `x >= 0`: `e^-x / x` for n = 0, the series with its
+/// digamma term for `x <= 1`, the continued fraction above (DLMF
+/// 8.19.17, bottom up). About 2 ulp (5.1e-16 measured); `E_n(0) = 1 /
+/// (n - 1)` for `n >= 2`. NaN for `x < 0`. SciPy: `expn`.
+///
+/// ```nabi
+/// assert((special::expn(2, 1.0) - 0.14849550677592205).abs() < 1e-16);
+/// assert(special::expn(3, 0.0) == 0.5);
+/// ```
+pub fn expn(n: u32, x: f64) -> f64 {
+    if x != x || x < 0.0 { return f64::NAN; }
+    let nf = n as f64;
+    if n == 0u32 { return if x == 0.0 { f64::INFINITY } else { (-x).exp() / x }; }
+    if x == 0.0 { return if n == 1u32 { f64::INFINITY } else { 1.0 / (nf - 1.0) }; }
+    if n == 1u32 { return e1(x); }
+    if x > 1.0 { return en_cf(nf, x); }
+    // DLMF 8.19.8: the sum over k of -(-x)^k / ((k - m) k!), m = n - 1,
+    // whose k = m term is (-x)^m / m! (psi(n) - ln x).
+    let m = nf - 1.0;
+    let s = 0.0;
+    let t = 1.0;
+    let k = 0.0;
+    while k < 200.0 {
+        let u = if k == m { t * (digamma(nf) - x.ln()) } else { -t / (k - m) };
+        s += u;
+        if k > m && u.abs() <= 0.25 * EPS * s.abs() { break; }
+        k += 1.0;
+        t *= -x / k;
+    }
+    s
+}
+
+/// `(Si(x), Ci(x))` for x > 2 from E1(ix) = -Ci(x) + i (Si(x) - pi / 2),
+/// the fraction of `en_cf` at n = 1, z = ix, from a depth of 330 / x + 5.
+fn sici_cf(x: f64) -> (f64, f64) {
+    let z = cx(0.0, x);
+    let k = (330.0 / x).floor() + 5.0;
+    let t = z + 2.0 * k + 1.0;
+    while k > 0.0 {
+        t = z + (2.0 * k - 1.0) - k * k / t;
+        k -= 1.0;
+    }
+    let e = cx(x.cos(), -x.sin()) / t;
+    (HALF_PI + e.im, -e.re)
+}
+
+/// The sine and cosine integrals `(Si(x), Ci(x))`, `Si(x) = int_0^x sin t
+/// / t dt`, `Ci(x) = euler + ln x + int_0^x (cos t - 1) / t dt`. The
+/// series to 2 (Ci's about its first zero, so that zero keeps full
+/// relative accuracy), the continued fraction past it: Si about 2 ulp
+/// (4.5e-16 measured), Ci 2 ulp (5.1e-16) except near its zeros past
+/// 2, where the error is a few 1e-16 absolute. For `x < 0`, Si is odd and Ci is the real part of the
+/// complex value (`Ci(|x|)`), as SciPy; `Ci(0) = -inf`. SciPy: `sici`.
+///
+/// ```nabi
+/// let (s, c) = special::sici(1.0);
+/// assert((s - 0.94608307036718301).abs() < 2e-16 && (c - 0.33740392290096813).abs() < 2e-16);
+/// ```
+pub fn sici(x: f64) -> (f64, f64) {
+    if x != x { return (x, x); }
+    let a = x.abs();
+    if a == 0.0 { return (x, f64::NEG_INFINITY); }
+    if a == f64::INFINITY { return (HALF_PI * x.signum(), 0.0); }
+    let (s, c) = if a > 2.0 {
+        sici_cf(a)
+    } else {
+        // Si = sum (-1)^k x^(2k+1) / ((2k+1) (2k+1)!).
+        let x2 = a * a;
+        let t = a;
+        let s = a;
+        let k = 1.0;
+        while k < 50.0 {
+            t *= -x2 / ((2.0 * k) * (2.0 * k + 1.0));
+            let u = t / (2.0 * k + 1.0);
+            s += u;
+            if u.abs() <= 0.25 * EPS * s.abs() { break; }
+            k += 1.0;
+        }
+        (s, about_zero(a, CI0, 2.0, -1.0))
+    };
+    (if x < 0.0 { -s } else { s }, c)
+}
+
+/// The sine integral `Si(x)`; see `sici`.
+///
+/// ```nabi
+/// assert((special::si(2.0) - 1.6054129768026948).abs() < 3e-16);
+/// ```
+pub fn si(x: f64) -> f64 { sici(x).0 }
+
+/// The cosine integral `Ci(x)`; see `sici`.
+///
+/// ```nabi
+/// assert((special::ci(2.0) - 0.42298082877486500).abs() < 2e-16);
+/// ```
+pub fn ci(x: f64) -> f64 { sici(x).1 }
+
+/// The hyperbolic sine and cosine integrals `(Shi(x), Chi(x))`, `Shi(x)
+/// = int_0^x sinh t / t dt`, `Chi(x) = euler + ln x + int_0^x (cosh t -
+/// 1) / t dt`: the series to 8 (Chi's about its zero 0.5238..., so it
+/// keeps full relative accuracy), `(Ei(x) +- E1(x)) / 2` past it. About
+/// 3 ulp to 8, 7 ulp past it where Ei sets the error (1.5e-15 measured
+/// near 30); `inf` past 716.4. For `x < 0`, Shi is odd and Chi is the real
+/// part (`Chi(|x|)`), as SciPy. SciPy: `shichi`.
+///
+/// ```nabi
+/// let (s, c) = special::shichi(1.0);
+/// assert((s - 1.0572508753757285).abs() < 3e-16 && (c - 0.83786694098020824).abs() < 2e-16);
+/// ```
+pub fn shichi(x: f64) -> (f64, f64) {
+    if x != x { return (x, x); }
+    let a = x.abs();
+    if a == 0.0 { return (x, f64::NEG_INFINITY); }
+    let (s, c) = if a > 8.0 {
+        let (p, q) = (ei(a), e1(a));
+        (0.5 * (p + q), 0.5 * (p - q))
+    } else {
+        let x2 = a * a;
+        let t = a;
+        let s = a;
+        let k = 1.0;
+        while k < 100.0 {
+            t *= x2 / ((2.0 * k) * (2.0 * k + 1.0));
+            let u = t / (2.0 * k + 1.0);
+            s += u;
+            if u <= 0.25 * EPS * s { break; }
+            k += 1.0;
+        }
+        (s, about_zero(a, CHI0, 2.0, 1.0))
+    };
+    (if x < 0.0 { -s } else { s }, c)
+}
+
+/// The hyperbolic sine integral `Shi(x)`; see `shichi`.
+///
+/// ```nabi
+/// assert(special::shi(0.0) == 0.0);
+/// ```
+pub fn shi(x: f64) -> f64 { shichi(x).0 }
+
+/// The hyperbolic cosine integral `Chi(x)`; see `shichi`.
+///
+/// ```nabi
+/// assert(special::chi(0.5238225713898644).abs() < 1e-16);
+/// ```
+pub fn chi(x: f64) -> f64 { shichi(x).1 }

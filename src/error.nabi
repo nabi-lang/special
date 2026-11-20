@@ -1,0 +1,41 @@
+// The one error type of the package. The scalar functions do not throw:
+// an argument outside the domain gives NaN, as in C's libm and SciPy.
+// Calls that build tables (roots, quadrature rules, coefficient lists)
+// throw this instead, saying what to pass.
+
+/// What went wrong in a call that throws.
+///
+/// ```nabi
+/// use special::SpecialError;
+///
+/// let e = try {
+///     _ = try special::roots_legendre(0);
+///     SpecialError::InvalidArgument { what: "" }
+/// } catch e: SpecialError { e };
+/// assert(f"{e}".contains("n >= 1"));
+/// ```
+#[derive(Clone, PartialEq, Debug)]
+pub enum SpecialError {
+    /// An argument out of its range; `what` names it, the range and
+    /// what to pass instead.
+    InvalidArgument { what: str; },
+    /// An iteration did not converge in `iterations` steps.
+    NoConvergence { what: str; iterations: usize; },
+}
+
+impl Display for SpecialError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let s = match self {
+            SpecialError::InvalidArgument { what } => f"invalid argument: {what}",
+            SpecialError::NoConvergence { what, iterations } => f"{what} did not converge in {iterations} iterations; the arguments are past the range this method covers",
+        };
+        try f.write_str(s)
+    }
+}
+
+impl Error for SpecialError {}
+
+/// `InvalidArgument` unless `ok`.
+pub(pkg) fn arg(ok: bool, what: str) throws (SpecialError) {
+    if !ok { throw SpecialError::InvalidArgument { what }; }
+}

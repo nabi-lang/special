@@ -1,0 +1,198 @@
+// Spherical Bessel functions j_n, y_n and the modified i_n, k_n with
+// their derivatives: the closed forms for n = 0, 1, the stable
+// recurrence (j_n upward only for x >= n, y_n and k_n always upward),
+// Miller's backward recurrence for j_n below x = n and for i_n, and the
+// half-integer order of `jv` / `iv` where neither fits.
+
+use pkg::bessel::real::{iv, jv};
+
+const FRAC_PI_2: f64 = 1.5707963267948966;
+
+/// `j_n(x)` for `n >= 0`.
+fn sj(n: u32, x: f64) -> f64 {
+    if x != x { return x; }
+    if x < 0.0 {
+        let r = sj(n, -x);
+        return if n % 2u32 == 0u32 { r } else { -r };
+    }
+    if x == 0.0 { return if n == 0u32 { 1.0 } else { 0.0 }; }
+    if x == f64::INFINITY { return 0.0; }
+    if n == 0u32 {
+        if x < 1e-4 { return 1.0 - x * x / 6.0; }
+        return x.sin() / x;
+    }
+    if x >= n as f64 && x > 1.0 {
+        let (s, c) = (x.sin(), x.cos());
+        let a = s / x;
+        let b = (s / x - c) / x;
+        for k in 1u32..n {
+            let t = (2u32 * k + 1u32) as f64 / x * b - a;
+            a = b;
+            b = t;
+        }
+        return b;
+    }
+    if x < 1.0 { return (FRAC_PI_2 / x).sqrt() * jv(n as f64 + 0.5, x); }
+    // Miller: backward from past the turning point, normalized by
+    // whichever of j_0, j_1 is the larger.
+    let nf = n as f64;
+    let m = (nf + 20.0 + (80.0 * nf).sqrt()) as u32;
+    let (b, bp) = (0.0, 1e-300);
+    let ans = 0.0;
+    let k = m;
+    while k > 0u32 {
+        let bm = (2u32 * k + 1u32) as f64 / x * bp - b;
+        b = bp;
+        bp = bm;
+        if k - 1u32 == n { ans = bp; }
+        if bp.abs() > 1e250 {
+            b *= 1e-250;
+            bp *= 1e-250;
+            ans *= 1e-250;
+        }
+        k -= 1u32;
+    }
+    // bp is j_0's multiple, b j_1's.
+    let (s, c) = (x.sin(), x.cos());
+    let j0 = s / x;
+    let j1 = (s / x - c) / x;
+    if j0.abs() >= j1.abs() { ans * (j0 / bp) } else { ans * (j1 / b) }
+}
+
+/// `y_n(x)` for `n >= 0`, `x > 0`.
+fn sy(n: u32, x: f64) -> f64 {
+    if !(x >= 0.0) { return f64::NAN; }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x == f64::INFINITY { return 0.0; }
+    let (s, c) = (x.sin(), x.cos());
+    let a = -c / x;
+    if n == 0u32 { return a; }
+    let b = (a - s) / x;
+    for k in 1u32..n {
+        let t = (2u32 * k + 1u32) as f64 / x * b - a;
+        a = b;
+        b = t;
+        if b == f64::NEG_INFINITY || b == f64::INFINITY { return b; }
+    }
+    b
+}
+
+/// `i_n(x)` for `n >= 0`.
+fn si(n: u32, x: f64) -> f64 {
+    if x != x { return x; }
+    if x < 0.0 {
+        let r = si(n, -x);
+        return if n % 2u32 == 0u32 { r } else { -r };
+    }
+    if x == 0.0 { return if n == 0u32 { 1.0 } else { 0.0 }; }
+    if x == f64::INFINITY { return x; }
+    if n == 0u32 {
+        if x < 1e-4 { return 1.0 + x * x / 6.0; }
+        // sinh(x) / x without overflowing before the division.
+        if x > 700.0 {
+            let h = (0.5 * x).exp();
+            return h / (2.0 * x) * h;
+        }
+        return x.sinh() / x;
+    }
+    if x > 1e4 { return (FRAC_PI_2 / x).sqrt() * iv(n as f64 + 0.5, x); }
+    // Miller: i_n falls with n, so the backward recurrence is stable;
+    // normalized by i_0 e^-x = (1 - e^-2x) / (2x).
+    let nf = n as f64;
+    let m = (nf + 20.0 + (80.0 * nf.max(x)).sqrt()) as u32;
+    let (b, bp) = (0.0, 1e-300);
+    let ans = 0.0;
+    let k = m;
+    while k > 0u32 {
+        let bm = (2u32 * k + 1u32) as f64 / x * bp + b;
+        b = bp;
+        bp = bm;
+        if k - 1u32 == n { ans = bp; }
+        if bp > 1e250 {
+            b *= 1e-250;
+            bp *= 1e-250;
+            ans *= 1e-250;
+        }
+        k -= 1u32;
+    }
+    let i0e = -(-2.0 * x).exp_m1() / (2.0 * x);
+    let h = (0.5 * x).exp();
+    ans * (i0e / bp) * h * h
+}
+
+/// `k_n(x)` for `n >= 0`, `x > 0`.
+fn sk(n: u32, x: f64) -> f64 {
+    if !(x >= 0.0) { return f64::NAN; }
+    if x == 0.0 { return f64::INFINITY; }
+    if x == f64::INFINITY { return 0.0; }
+    let a = FRAC_PI_2 / x * (-x).exp();
+    if n == 0u32 { return a; }
+    let b = a * (1.0 + 1.0 / x);
+    for k in 1u32..n {
+        let t = (2u32 * k + 1u32) as f64 / x * b + a;
+        a = b;
+        b = t;
+        if b == f64::INFINITY { return b; }
+    }
+    b
+}
+
+/// The spherical Bessel function of the first kind `j_n(x) = sqrt(pi /
+/// (2x)) J_(n+1/2)(x)`, or its derivative with `derivative: true` (`j'_n
+/// = j_(n-1) - (n + 1) / x j_n`). Upward recurrence from `sin x / x`
+/// where it is stable (`x >= n`), `jv` below it; about 1e-15 relative
+/// off the zeros. SciPy: `spherical_jn`.
+///
+/// ```nabi
+/// assert((special::spherical_jn(0, 2.0) - 2f64.sin() / 2.0).abs() < 3e-16);
+/// assert((special::spherical_jn(1, 2.0, derivative: true) - 0.01925093843284923).abs() < 3e-16);
+/// ```
+pub fn spherical_jn(n: u32, x: f64, derivative: bool = false) -> f64 {
+    if !derivative { return sj(n, x); }
+    if n == 0u32 { return -sj(1u32, x); }
+    if x == 0.0 { return if n == 1u32 { 1.0 / 3.0 } else { 0.0 }; }
+    sj(n - 1u32, x) - (n + 1u32) as f64 / x * sj(n, x)
+}
+
+/// The spherical Bessel function of the second kind `y_n(x)`, `x > 0`,
+/// or its derivative; upward recurrence from `-cos x / x`. SciPy:
+/// `spherical_yn`.
+///
+/// ```nabi
+/// assert((special::spherical_yn(0, 2.0) + 2f64.cos() / 2.0).abs() < 3e-16);
+/// ```
+pub fn spherical_yn(n: u32, x: f64, derivative: bool = false) -> f64 {
+    if !derivative { return sy(n, x); }
+    if n == 0u32 { return -sy(1u32, x); }
+    if x == 0.0 { return f64::INFINITY; }
+    sy(n - 1u32, x) - (n + 1u32) as f64 / x * sy(n, x)
+}
+
+/// The modified spherical Bessel function of the first kind `i_n(x) =
+/// sqrt(pi / (2x)) I_(n+1/2)(x)`, or its derivative (`i'_n = i_(n-1) -
+/// (n + 1) / x i_n`). SciPy: `spherical_in`.
+///
+/// ```nabi
+/// assert((special::spherical_in(0, 2.0) - 2f64.sinh() / 2.0).abs() < 1e-15);
+/// ```
+pub fn spherical_in(n: u32, x: f64, derivative: bool = false) -> f64 {
+    if !derivative { return si(n, x); }
+    if n == 0u32 { return si(1u32, x); }
+    if x == 0.0 { return if n == 1u32 { 1.0 / 3.0 } else { 0.0 }; }
+    si(n - 1u32, x) - (n + 1u32) as f64 / x * si(n, x)
+}
+
+/// The modified spherical Bessel function of the second kind `k_n(x) =
+/// sqrt(pi / (2x)) K_(n+1/2)(x)` (`k_0 = pi / (2x) e^-x`), `x > 0`, or
+/// its derivative (`k'_n = -k_(n-1) - (n + 1) / x k_n`); upward
+/// recurrence. SciPy: `spherical_kn`.
+///
+/// ```nabi
+/// assert((special::spherical_kn(0, 1.0) - 1.5707963267948966 * (-1.0f64).exp()).abs() < 3e-16);
+/// ```
+pub fn spherical_kn(n: u32, x: f64, derivative: bool = false) -> f64 {
+    if !derivative { return sk(n, x); }
+    if n == 0u32 { return -sk(1u32, x); }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    -sk(n - 1u32, x) - (n + 1u32) as f64 / x * sk(n, x)
+}

@@ -1,0 +1,58 @@
+// Bessel and Airy functions, 1000 calls per iteration over a spread of
+// arguments, so items/s reads as calls per second.
+
+use core::bench::Bench;
+use core::hint::black_box;
+
+const N: usize = 1000;
+
+fn xs(lo: f64, hi: f64) -> List<f64> {
+    let v: List<f64> = List::with_capacity(N);
+    for i in 0..N { v.push(lo + (hi - lo) * (i as f64 + 0.5) / N as f64); }
+    v
+}
+
+fn run(b: Bench, x: List<f64>, f: fn(f64) -> f64) {
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for t in black_box(x) { s += f(t); }
+        s
+    });
+}
+
+#[bench]
+fn j0_0_30(b: Bench) { run(b, xs(0.0, 30.0), |x: f64| -> f64 { pkg::j0(x) }); }
+
+#[bench]
+fn y1_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::y1(x) }); }
+
+#[bench]
+fn k0_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::k0(x) }); }
+
+#[bench]
+fn jn5_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::jn(5, x) }); }
+
+#[bench]
+fn jv_2_3_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::jv(2.3, x) }); }
+
+#[bench]
+fn jv_2_3_30_1000(b: Bench) { run(b, xs(30.0, 1000.0), |x: f64| -> f64 { pkg::jv(2.3, x) }); }
+
+#[bench]
+fn yv_0_7_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::yv(0.7, x) }); }
+
+#[bench]
+fn kv_1_4_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::kv(1.4, x) }); }
+
+#[bench]
+fn iv_10_5_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::iv(10.5, x) }); }
+
+#[bench]
+fn spherical_jn3_0_30(b: Bench) { run(b, xs(0.01, 30.0), |x: f64| -> f64 { pkg::spherical_jn(3, x) }); }
+
+#[bench]
+fn airy_m20_5(b: Bench) { run(b, xs(-20.0, 5.0), |x: f64| -> f64 { pkg::airy(x).0 }); }
+
+#[bench]
+fn struve_h0_0_50(b: Bench) { run(b, xs(0.01, 50.0), |x: f64| -> f64 { pkg::struve_h(0.0, x) }); }

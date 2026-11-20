@@ -1,0 +1,5 @@
+// The classical orthogonal polynomials: evaluation by their three-term
+// recurrences, and Gauss quadrature rules (the nodes are the roots).
+
+pub(pkg) mod eval;
+pub(pkg) mod quadrature;

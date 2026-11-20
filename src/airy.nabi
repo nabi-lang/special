@@ -1,0 +1,180 @@
+// The Airy functions Ai, Bi and their derivatives for real x: the
+// Maclaurin series f, g of Abramowitz and Stegun 10.4.2-3 on [-2.5, 1]
+// (Bi on [-2.5, 2]), and the Bessel forms of DLMF 9.6 outside it, Ai
+// through K_1/3 and K_2/3 of zeta = 2/3 |x|^(3/2), Bi through I and K,
+// both for x < 0 through J_1/3, Y_1/3, J_2/3, Y_2/3.
+
+use pkg::bessel::real::{hankel_jy_at, hankel_pq, ik, jy};
+
+const PI: f64 = 3.141592653589793;
+const SQRT3: f64 = 1.7320508075688772;
+// Ai(0) and -Ai'(0).
+const C1: f64 = 0.3550280538878172;
+const C2: f64 = 0.2588194037928068;
+const EPS: f64 = 2.220446049250313e-16;
+// 2/3 as a double-double.
+const TT: (f64, f64) = (0.6666666666666666, 3.700743415417188e-17);
+
+/// `(f, f', g, g')` of the Maclaurin series.
+fn fg(x: f64) -> (f64, f64, f64, f64) {
+    let x3 = x * x * x;
+    let (f, t) = (1.0, 1.0);
+    let tp = 0.5 * x * x;
+    let fp = tp;
+    let (g, u) = (x, x);
+    let (gp, up) = (1.0, 1.0);
+    let k = 1.0;
+    while k < 60.0 {
+        let k3 = 3.0 * k;
+        t *= x3 / ((k3 - 1.0) * k3);
+        u *= x3 / (k3 * (k3 + 1.0));
+        up *= x3 / (k3 * (k3 - 2.0));
+        if k > 1.0 { tp *= x3 / ((k3 - 1.0) * (k3 - 3.0)); }
+        f += t;
+        g += u;
+        gp += up;
+        if k > 1.0 { fp += tp; }
+        let q = 0.25 * EPS;
+        if t.abs() <= q * f.abs() && u.abs() <= q * g.abs() && up.abs() <= q * gp.abs() && tp.abs() <= q * fp.abs() { break; }
+        k += 1.0;
+    }
+    (f, fp, g, gp)
+}
+
+/// `zeta = 2/3 z^(3/2)` as a double-double: its rounding would shift the
+/// phase (x < 0) or the exponential (x > 0) by `zeta eps`.
+fn zeta_dd(z: f64, sz: f64) -> (f64, f64) {
+    let e = (-sz).mul_add(sz, z) / (2.0 * sz);
+    let ph = z * sz;
+    let pl = z.mul_add(sz, -ph) + z * e;
+    let zh = ph * TT.0;
+    (zh, ph.mul_add(TT.0, -zh) + (ph * TT.1 + pl * TT.0))
+}
+
+/// `(Ai, Ai', Bi, Bi')` with Ai, Ai' times `e^zeta` and Bi, Bi' times
+/// `e^-zeta` when `scaled` and `x > 0`.
+fn airy4(x: f64, scaled: bool) -> (f64, f64, f64, f64) {
+    if x != x { return (x, x, x, x); }
+    if x == f64::INFINITY { return if scaled { (0.0, 0.0, 0.0, 0.0) } else { (0.0, -0.0, x, x) }; }
+    if x == f64::NEG_INFINITY { return (0.0, f64::NAN, 0.0, f64::NAN); }
+    let z = x.abs();
+    let zeta = 2.0 / 3.0 * z * z.sqrt();
+    let sz = z.sqrt();
+    if x < -2.5 {
+        let r1 = hankel_pq(1.0 / 3.0, zeta);
+        let r2 = hankel_pq(2.0 / 3.0, zeta);
+        let (j1, y1, j2, y2) = (0.0, 0.0, 0.0, 0.0);
+        if zeta > 12.0 && r1 is (f64, f64) && r2 is (f64, f64) {
+            let (zh, zl) = zeta_dd(z, sz);
+            let (c, s) = (zh.cos(), zh.sin());
+            let (cx, sx) = (c - zl * s, s + zl * c);
+            (j1, y1) = hankel_jy_at(1.0 / 3.0, zh, r1, cx, sx);
+            (j2, y2) = hankel_jy_at(2.0 / 3.0, zh, r2, cx, sx);
+        } else {
+            (j1, y1) = jy(1.0 / 3.0, zeta);
+            (j2, y2) = jy(2.0 / 3.0, zeta);
+        }
+        let ai = 0.5 * sz * (j1 - y1 / SQRT3);
+        let aip = 0.5 * z * (j2 + y2 / SQRT3);
+        let bi = -0.5 * sz * (j1 / SQRT3 + y1);
+        let bip = 0.5 * z * (j2 / SQRT3 - y2);
+        return (ai, aip, bi, bip);
+    }
+    let (ai, aip, bi, bip) = (0.0, 0.0, 0.0, 0.0);
+    let ez = if scaled && x > 0.0 { zeta.exp() } else { 1.0 };
+    if x <= 1.0 {
+        let (f, fp, g, gp) = fg(x);
+        ai = (C1 * f - C2 * g) * ez;
+        aip = (C1 * fp - C2 * gp) * ez;
+    } else {
+        // Ai = sqrt(x / 3) K_1/3 / pi, Ai' = -x K_2/3 / (pi sqrt 3), from
+        // the scaled K.
+        let k1 = ik(1.0 / 3.0, zeta).1;
+        let k2 = ik(2.0 / 3.0, zeta).1;
+        let (zh, zl) = zeta_dd(z, sz);
+        let e = if scaled { 1.0 } else { (-zh).exp() * (1.0 - zl) };
+        ai = sz / SQRT3 * k1 / PI * e;
+        aip = -z / (PI * SQRT3) * k2 * e;
+    }
+    if x <= 2.0 {
+        let (f, fp, g, gp) = fg(x);
+        let e = if scaled && x > 0.0 { (-zeta).exp() } else { 1.0 };
+        bi = SQRT3 * (C1 * f + C2 * g) * e;
+        bip = SQRT3 * (C1 * fp + C2 * gp) * e;
+    } else {
+        // I_-v = I_v + (2 / pi) sin(v pi) K_v, all scaled; the K term is
+        // e^-2 zeta smaller.
+        let (i1, k1) = ik(1.0 / 3.0, zeta);
+        let (i2, k2) = ik(2.0 / 3.0, zeta);
+        let d = (-2.0 * zeta).exp() * SQRT3 / PI;
+        let b = sz / SQRT3 * (2.0 * i1 + d * k1);
+        let bp = z / SQRT3 * (2.0 * i2 + d * k2);
+        if scaled {
+            bi = b;
+            bip = bp;
+        } else {
+            let (zh, zl) = zeta_dd(z, sz);
+            let h = (0.5 * zh).exp() * (1.0 + 0.5 * zl);
+            bi = b * h * h;
+            bip = bp * h * h;
+        }
+    }
+    (ai, aip, bi, bip)
+}
+
+/// `(Ai(x), Ai'(x), Bi(x), Bi'(x))` in one call. About 1e-15 relative
+/// for `x > -2.5` (Ai underflows past 105, Bi overflows past 104); for
+/// `x < -2.5` about 1e-16 absolute times the envelope `|x|^(1/4)`, with
+/// the phase error `zeta eps` that rounding `x` itself costs. SciPy:
+/// `airy`.
+///
+/// ```nabi
+/// let (ai, aip, bi, bip) = special::airy(0.0);
+/// assert((ai - 0.3550280538878172).abs() < 1e-16 && (bip - 0.4482883573538264).abs() < 3e-16);
+/// // The Wronskian Ai Bi' - Ai' Bi = 1 / pi.
+/// let (a, ap, b, bp) = special::airy(-3.7);
+/// assert((a * bp - ap * b - 1.0 / 3.141592653589793).abs() < 1e-15);
+/// ```
+pub fn airy(x: f64) -> (f64, f64, f64, f64) { airy4(x, false) }
+
+/// `airy(x)` scaled: Ai and Ai' times `e^zeta`, Bi and Bi' times
+/// `e^-zeta` for `x > 0` (`zeta = 2/3 x^(3/2)`), unscaled for `x <= 0`;
+/// finite where `airy` under- or overflows. SciPy: `airye`.
+///
+/// ```nabi
+/// let (eai, _, ebi, _) = special::airye(200.0);
+/// // Ai(x) e^zeta ~ x^(-1/4) / (2 sqrt(pi)).
+/// assert(((eai - 200f64.pow(-0.25) / (2.0 * 3.141592653589793f64.sqrt())) / eai).abs() < 1e-4);
+/// assert(ebi.is_finite());
+/// ```
+pub fn airye(x: f64) -> (f64, f64, f64, f64) { airy4(x, true) }
+
+/// The Airy function `Ai(x)`, the solution of `y'' = x y` that decays
+/// as `x -> inf`. See `airy` for the accuracy.
+///
+/// ```nabi
+/// assert((special::ai(1.0) - 0.13529241631288141).abs() < 3e-16);
+/// ```
+pub fn ai(x: f64) -> f64 { airy4(x, false).0 }
+
+/// `Ai'(x)`.
+///
+/// ```nabi
+/// assert((special::aip(1.0) + 0.15914744129679328).abs() < 3e-16);
+/// ```
+pub fn aip(x: f64) -> f64 { airy4(x, false).1 }
+
+/// The Airy function `Bi(x)`, the solution of `y'' = x y` that grows
+/// as `x -> inf`.
+///
+/// ```nabi
+/// assert((special::bi(1.0) - 1.2074235949528713).abs() < 3e-16);
+/// ```
+pub fn bi(x: f64) -> f64 { airy4(x, false).2 }
+
+/// `Bi'(x)`.
+///
+/// ```nabi
+/// assert((special::bip(1.0) - 0.9324359333927756).abs() < 2e-16);
+/// ```
+pub fn bip(x: f64) -> f64 { airy4(x, false).3 }

@@ -1,0 +1,540 @@
+// The gamma function family: ln Gamma, Gamma, digamma, the regularized
+// incomplete gamma functions P and Q and their inverses.
+//
+// ln Gamma(2 + z) for |z| <= 1/2 is its Taylor series with coefficients
+// (-1)^k (zeta(k) - 1) / k (Abramowitz and Stegun 6.1.33), so the zeros
+// at 1 and 2 keep full relative accuracy; other arguments shift there
+// by the recurrence or use Stirling's series (x >= 13) and the
+// reflection formula (x < 0).
+
+use pkg::normal::ndtri;
+
+const PI: f64 = 3.141592653589793;
+const LN_SQRT_2PI: f64 = 0.9189385332046728;
+const SQRT_2PI: f64 = 2.5066282746310002;
+const EPS: f64 = 2.220446049250313e-16;
+
+// (-1)^k (zeta(k) - 1) / k for k = 2..31, after c1 = 1 - Euler's gamma.
+const C1: f64 = 0.42278433509846713;
+const ZC: [f64; 30] = [
+    0.3224670334241132, -0.0673523010531981, 0.020580808427784546, -0.007385551028673986,
+    0.0028905103307415234, -0.001192753911703261, 0.0005096695247430425, -0.00022315475845357939,
+    9.945751278180853e-05, -4.492623673813314e-05, 2.050721277567069e-05, -9.439488275268397e-06,
+    4.374866789907488e-06, -2.039215753801366e-06, 9.55141213040742e-07, -4.492469198764566e-07,
+    2.1207184805554665e-07, -1.0043224823968099e-07, 4.7698101693639804e-08, -2.2711094608943164e-08,
+    1.0838659214896955e-08, -5.183475041970047e-09, 2.4836745438024785e-09, -1.1921401405860912e-09,
+    5.731367241678862e-10, -2.7595228851242334e-10, 1.330476437424449e-10, -6.4229645638381e-11,
+    3.1044247747322276e-11, -1.5021384080754142e-11,
+];
+
+// Stirling's correction ln Gamma(x) - ((x - 1/2) ln x - x + ln sqrt(2 pi)):
+// B_2k / (2k (2k - 1)) for k = 1..8.
+const ST: [f64; 8] = [
+    0.08333333333333333, -0.002777777777777778, 0.0007936507936507937, -0.0005952380952380953,
+    0.0008417508417508417, -0.0019175269175269176, 0.00641025641025641, -0.029550653594771242,
+];
+
+// Factorials 0! ..= 22!, all exact in f64.
+const FACT: [f64; 23] = [
+    1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0, 3628800.0, 39916800.0,
+    479001600.0, 6227020800.0, 87178291200.0, 1307674368000.0, 20922789888000.0, 355687428096000.0,
+    6402373705728000.0, 121645100408832000.0, 2432902008176640000.0, 51090942171709440000.0,
+    1124000727777607680000.0,
+];
+
+/// `ln Gamma(2 + z)`, `|z| <= 1/2`: the Taylor series about 2.
+fn lg2(z: f64) -> f64 {
+    let s = 0.0;
+    let k = 30usize;
+    while k > 0 {
+        k -= 1;
+        s = s * z + ZC[k];
+    }
+    z * (C1 + z * s)
+}
+
+/// Stirling's correction for `x >= 10`; under 1e-17 relative at 13.
+pub(pkg) fn stirling(x: f64) -> f64 {
+    let r = 1.0 / x;
+    let r2 = r * r;
+    let s = 0.0;
+    let k = 8usize;
+    while k > 0 {
+        k -= 1;
+        s = s * r2 + ST[k];
+    }
+    s * r
+}
+
+/// `sin(pi x)`, exact at the integers and half-integers (0 and +-1
+/// there, never 1e-16), with the argument reduced before the product
+/// with pi so large `x` keeps full accuracy.
+///
+/// ```nabi
+/// assert(special::sinpi(1.0) == 0.0 && special::sinpi(0.5) == 1.0);
+/// assert((special::sinpi(1e10 + 0.25) - 0.5f64.sqrt()).abs() < 1e-15);
+/// ```
+pub fn sinpi(x: f64) -> f64 {
+    let r = x % 2.0;
+    if r > 1.0 { r -= 2.0; } else if r < -1.0 { r += 2.0; }
+    let neg = r < 0.0;
+    let a = r.abs();
+    if a > 0.5 { a = 1.0 - a; }
+    let s = (PI * a).sin();
+    if neg { -s } else { s }
+}
+
+/// `cos(pi x)`, exact at the integers and half-integers.
+///
+/// ```nabi
+/// assert(special::cospi(0.5) == 0.0 && special::cospi(1.0) == -1.0);
+/// ```
+pub fn cospi(x: f64) -> f64 { sinpi(x.abs() + 0.5) }
+
+/// `ln |Gamma(x)|`. About 2 ulp for `x > 0` (full relative accuracy
+/// at the zeros 1 and 2); for `x < 0` the reflection formula, with
+/// absolute error near 1e-16 times the result's size. `inf` at 0 and
+/// the negative integers. Python: `math.lgamma`.
+///
+/// ```nabi
+/// use special::lgamma;
+///
+/// assert(lgamma(1.0) == 0.0 && lgamma(2.0) == 0.0);
+/// assert((lgamma(0.5) - 0.5723649429247001).abs() < 1e-16);
+/// assert((lgamma(100.0) - 359.1342053695754).abs() < 1e-12);
+/// ```
+pub fn lgamma(x: f64) -> f64 {
+    if x != x { return x; }
+    if x.is_infinite() { return f64::INFINITY; }
+    if x <= 0.0 {
+        if x == x.floor() { return f64::INFINITY; }
+        return (PI / sinpi(x).abs()).ln() - lgamma(1.0 - x);
+    }
+    if x < 0.5 { return lg2(x) - x.ln_1p() - x.ln(); }
+    if x < 1.5 { return lg2(x - 1.0) - (x - 1.0).ln_1p(); }
+    if x < 2.5 { return lg2(x - 2.0); }
+    if x < 13.0 {
+        let n = (x - 1.5).floor();
+        let p = 1.0;
+        let k = 1.0;
+        while k <= n {
+            p *= x - k;
+            k += 1.0;
+        }
+        return lg2(x - n - 2.0) + p.ln();
+    }
+    (x - 0.5) * x.ln() - x + LN_SQRT_2PI + stirling(x)
+}
+
+/// `ln Gamma(1 + a)`, accurate as `a` goes to 0 (the Taylor series
+/// about 2 for `|a| <= 1/2`), where `lgamma(1.0 + a)` loses the digits
+/// of `a` that `1 + a` rounds away.
+///
+/// ```nabi
+/// assert((special::lgamma1p(1e-10) + 5.772156648192862e-11).abs() < 1e-26);
+/// ```
+pub fn lgamma1p(a: f64) -> f64 {
+    if a.abs() <= 0.5 { return lg2(a) - a.ln_1p(); }
+    lgamma(1.0 + a)
+}
+
+/// `Gamma(x)`. A few ulp for `x > 0` (exact factorials up to 22!);
+/// the reflection formula for `x < 0`. Overflows to `inf` past
+/// 171.6; `NaN` at the negative integers, `+-inf` at `+-0`.
+///
+/// ```nabi
+/// use special::gamma;
+///
+/// assert(gamma(5.0) == 24.0);
+/// assert((gamma(0.5) - 1.7724538509055159).abs() < 4e-16);
+/// assert((gamma(-1.5) - 2.3632718012073548).abs() < 1e-15);
+/// ```
+pub fn gamma(x: f64) -> f64 {
+    if x != x { return x; }
+    if x == f64::INFINITY { return x; }
+    if x == f64::NEG_INFINITY { return f64::NAN; }
+    if x == 0.0 { return if x.is_sign_negative() { f64::NEG_INFINITY } else { f64::INFINITY }; }
+    if x < 0.0 {
+        if x == x.floor() { return f64::NAN; }
+        let s = sinpi(x);
+        if x < -170.0 {
+            // Gamma(1 - x) overflows; the result is below 1e-300.
+            let l = (PI / s.abs()).ln() - lgamma(1.0 - x);
+            let m = l.exp();
+            return if s < 0.0 { -m } else { m };
+        }
+        return PI / (s * gamma(1.0 - x));
+    }
+    if x > 171.62437695630272 { return f64::INFINITY; }
+    if x == x.floor() && x <= 23.0 { return FACT[x as usize - 1]; }
+    if x < 0.5 { return lg2(x).exp() / (x * (1.0 + x)); }
+    if x < 1.5 { return lg2(x - 1.0).exp() / x; }
+    if x < 2.5 { return lg2(x - 2.0).exp(); }
+    if x < 13.0 {
+        let n = (x - 1.5).floor();
+        let p = lg2(x - n - 2.0).exp();
+        let k = 1.0;
+        while k <= n {
+            p *= x - k;
+            k += 1.0;
+        }
+        return p;
+    }
+    // x^(x - 1/2) e^-x as y (y e^-x) with y = x^((x - 1/2) / 2): one
+    // rounding in pow and one in exp, no overflow below 171.6.
+    let y = x.pow((x - 0.5) * 0.5);
+    SQRT_2PI * y * (y * (-x).exp()) * stirling(x).exp()
+}
+
+// psi about its positive zero x0: psi^(k)(x0) / k!, k = 1..52 (mpmath).
+const X0: f64 = 1.4616321449683622;
+const X0_LO: f64 = 9.549995429965697e-17;
+const PC: [f64; 52] = [
+    0.9676722454476212, -0.4427631689835921, 0.258499760955651, -0.16394270544240652,
+    0.10782405069126237, -0.07219956125645471, 0.04880428816414311, -0.03316112647484736,
+    0.022597648232218104, -0.01542476590494896, 0.010538791616612175, -0.007204534386356869,
+    0.004926781395729853, -0.003369801655439328, 0.002305126326734928, -0.0015769367714301972,
+    0.0010788252019162967, -0.0007380709389960052, 0.000504953265834602, -0.0003454680251063077,
+    0.00023635601564027053, -0.00016170622091974803, 0.0001106337276874741, -7.569179582195066e-05,
+    5.178575795222081e-05, -3.5430070947659604e-05, 2.424006611860132e-05, -1.6584242271854135e-05,
+    1.134638458466385e-05, -7.762817668462094e-06, 5.3110609208898636e-06, -3.6336507898010456e-06,
+    2.486022733129538e-06, -1.7008538854332607e-06, 1.1636675363548843e-06, -7.96142543124197e-07,
+    5.446941930669446e-07, -3.7266161283438227e-07, 2.549626552021554e-07, -1.7443695117727745e-07,
+    1.1934394829830244e-07, -8.165115189488409e-08, 5.586299683532171e-08, -3.821960061917494e-08,
+    2.6148576951961865e-08, -1.788998486491149e-08, 1.2239731403233662e-08, -8.37401629767179e-09,
+    5.729222859849993e-09, -3.9197433359423324e-09, 2.681757752408109e-09, -1.8347692760029681e-09,
+];
+
+fn taylor_psi(x: f64) -> f64 {
+    let h = (x - X0) - X0_LO;
+    let s = 0.0;
+    let k = 52usize;
+    while k > 0 {
+        k -= 1;
+        s = s * h + PC[k];
+    }
+    h * s
+}
+
+/// The digamma function `psi(x) = Gamma'(x) / Gamma(x)`. A few ulp for
+/// `x > 0`, the positive zero 1.46163... included: the Taylor series
+/// about the zero on [0.91, 2.01], recurrence into it below 10, the
+/// asymptotic series above; reflection for `x < 0`. `NaN` at the negative integers, `-inf` at 0.
+///
+/// ```nabi
+/// use special::digamma;
+///
+/// assert((digamma(1.0) + 0.5772156649015329).abs() < 1e-16);
+/// assert((digamma(0.5) + 1.9635100260214235).abs() < 1e-15);
+/// ```
+pub fn digamma(x: f64) -> f64 {
+    if x != x { return x; }
+    if x == f64::INFINITY { return x; }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x < 0.0 {
+        if x == x.floor() { return f64::NAN; }
+        return digamma(1.0 - x) - PI * cospi(x) / sinpi(x);
+    }
+    // [0.91, 2.01] by the Taylor series about the zero; below it by
+    // psi(x) = psi(x + 1) - 1 / x, above it by stepping down into it while
+    // below 10 (all the added terms positive) and the asymptotic series
+    // past 10.
+    if x < 0.91 { return digamma(x + 1.0) - 1.0 / x; }
+    if x <= 2.01 { return taylor_psi(x); }
+    if x < 10.0 {
+        let n = (x - 1.01).floor();
+        let y = x - n;
+        let s = taylor_psi(y);
+        let k = 0.0;
+        while k < n {
+            s += 1.0 / (y + k);
+            k += 1.0;
+        }
+        return s;
+    }
+    let r = 1.0 / (x * x);
+    // B_2k / (2k) for k = 1..7.
+    let t = r * (0.08333333333333333 - r * (0.008333333333333333 - r * (0.003968253968253968 - r * (0.004166666666666667 - r * (0.007575757575757576 - r * (0.021092796092796094 - r * 0.08333333333333333))))));
+    x.ln() - 0.5 / x - t
+}
+
+/// `ln t - (t - 1)` for a ratio `t > 0`: the series in `u = t - 1`
+/// below 1/4 in size, else from `ln t` itself, so a `t` far below 1
+/// keeps its relative accuracy.
+pub(pkg) fn log1pmx_ratio(t: f64) -> f64 {
+    let u = t - 1.0;
+    if u.abs() >= 0.25 { return t.ln() - u; }
+    log1pmx(u)
+}
+
+/// `ln(1 + u) - u`, accurate for small `u` (the series below 1/4 in
+/// size, `ln_1p(u) - u` past it).
+///
+/// ```nabi
+/// assert((special::log1pmx(1e-8) + 4.999999966666667e-17).abs() < 1e-31);
+/// ```
+pub fn log1pmx(u: f64) -> f64 {
+    if u.abs() >= 0.25 { return u.ln_1p() - u; }
+    // -u^2/2 + u^3/3 - u^4/4 + ...
+    let s = 0.0;
+    let p = u * u;
+    let k = 2.0;
+    loop {
+        let t = p / k;
+        if k % 2.0 == 0.0 { s -= t; } else { s += t; }
+        if t.abs() <= EPS * 0.25 * s.abs() { break; }
+        p *= u;
+        k += 1.0;
+    }
+    s
+}
+
+/// `x^a e^-x / Gamma(a)`, the factor in front of both P and Q, so `x`
+/// times the density of Gamma(a, 1) at `x`. For `a >= 10` through `a
+/// log1pmx((x - a) / a)` and Stirling's correction, so the large
+/// exponents cancel before the exponential: full accuracy at `a = 1e6`.
+///
+/// ```nabi
+/// assert((special::gammainc_factor(2.0, 3.0) - 9.0 * (-3.0).exp()).abs() < 1e-16);
+/// ```
+pub fn gammainc_factor(a: f64, x: f64) -> f64 {
+    if !(a > 0.0) || !(x >= 0.0) { return f64::NAN; }
+    gamma_prefix(a, x)
+}
+
+pub(pkg) fn gamma_prefix(a: f64, x: f64) -> f64 {
+    if x == 0.0 { return 0.0; }
+    if a < 10.0 {
+        // x^a e^-x / Gamma(a) as three correctly rounded factors while
+        // they stay finite: the exponent's rounding would cost x eps.
+        if x < 700.0 && a * x.ln() < 700.0 { return x.pow(a) * (-x).exp() / gamma(a); }
+        return (a * x.ln() - x - lgamma(a)).exp();
+    }
+    (a / (2.0 * PI)).sqrt() * (a * log1pmx_ratio(x / a) - stirling(a)).exp()
+}
+
+/// `(P(a, x), Q(a, x))` in one evaluation, each with full relative
+/// accuracy where it is the smaller: the series for `x < a + 1`,
+/// Legendre's continued fraction above, and for `a < 1`, `x < 1.1` the
+/// series for `Gamma(a, x)` that keeps a small Q accurate (DiDonato and
+/// Morris 1986). `a > 0`, `x >= 0`, else both NaN.
+///
+/// ```nabi
+/// let (p, q) = special::gammainc_pq(3.0, 2.0);
+/// assert((p - special::gammainc(3.0, 2.0)).abs() < 1e-16 && (p + q - 1.0).abs() < 1e-16);
+/// ```
+pub fn gammainc_pq(a: f64, x: f64) -> (f64, f64) {
+    if !(a > 0.0) || !(x >= 0.0) { return (f64::NAN, f64::NAN); }
+    gamma_pq(a, x)
+}
+
+pub(pkg) fn gamma_pq(a: f64, x: f64) -> (f64, f64) {
+    if x == 0.0 { return (0.0, 1.0); }
+    if x == f64::INFINITY { return (1.0, 0.0); }
+    if x < a + 1.0 {
+        let p = gamma_series(a, x);
+        if a < 1.0 && x < 1.1 { return (p, small_q(a, x)); }
+        return (p, 1.0 - p);
+    }
+    let q = gamma_cf(a, x);
+    (1.0 - q, q)
+}
+
+fn gamma_series(a: f64, x: f64) -> f64 {
+    let pf = gamma_prefix(a, x);
+    if pf == 0.0 { return 0.0; }
+    let term = 1.0 / a;
+    let s = term;
+    let n = 1.0;
+    // The terms fall like x / (a + n): about sqrt(a) * 6 of them near x = a.
+    while n < 1e7 {
+        term *= x / (a + n);
+        s += term;
+        if term <= s * EPS * 0.5 { break; }
+        n += 1.0;
+    }
+    pf * s
+}
+
+fn gamma_cf(a: f64, x: f64) -> f64 {
+    let pf = gamma_prefix(a, x);
+    if pf == 0.0 { return 0.0; }
+    pf * legendre_cf(a, x)
+}
+
+/// `1 / g` for Legendre's continued fraction `Gamma(a, x) = e^-x x^a / g`
+/// (DLMF 8.9.2) in its even form, `g = x + 1 - a - 1 (1 - a) / (x + 3 -
+/// a - 2 (2 - a) / (x + 5 - a - ...))`, for `x >= a + 1`.
+fn legendre_cf(a: f64, x: f64) -> f64 {
+    let n = 16.0;
+    let r = legendre_at(a, x, n);
+    while n < 1e7 {
+        n *= 2.0;
+        let t = legendre_at(a, x, n);
+        if (t - r).abs() <= EPS * t { return t; }
+        r = t;
+    }
+    r
+}
+
+/// The fraction cut after `n` levels and summed bottom up, which loses
+/// far less to rounding than the forward evaluations; `legendre_cf`
+/// doubles `n` until two cuts agree.
+fn legendre_at(a: f64, x: f64, n: f64) -> f64 {
+    let t = x + 2.0 * n + 1.0 - a;
+    let k = n;
+    while k > 0.0 {
+        t = x + 2.0 * k - 1.0 - a - k * (k - a) / t;
+        k -= 1.0;
+    }
+    1.0 / t
+}
+
+// Q(a, x) for a < 1, x < 1.1: Gamma(a, x) = (Gamma(1 + a) - x^a) / a +
+// x^a sum_{n >= 1} (-1)^(n + 1) x^n / (n! (a + n)), divided by Gamma(a).
+fn small_q(a: f64, x: f64) -> f64 {
+    let l = lgamma1p(a);
+    // (Gamma(1 + a) - x^a) / Gamma(1 + a), both near 1.
+    let xa1 = (a * x.ln()).exp_m1();
+    let g1 = l.exp_m1();
+    let head = (g1 - xa1) / (1.0 + g1);
+    let s = 0.0;
+    let t = 1.0;
+    let n = 1.0;
+    while n < 200.0 {
+        t *= -x / n;
+        let term = -t / (a + n);
+        s += term;
+        if term.abs() <= EPS * s.abs() * 0.5 { break; }
+        n += 1.0;
+    }
+    // x^a / Gamma(a) * s = a x^a / Gamma(1 + a) * s.
+    head + a * (1.0 + xa1) / (1.0 + g1) * s
+}
+
+/// The regularized lower incomplete gamma function `P(a, x) =
+/// gamma(a, x) / Gamma(a)`, `a > 0`, `x >= 0` (NaN otherwise); the CDF
+/// of Gamma(a, 1). Relative error about 1e-15 for `a` below 100,
+/// growing like `a * eps` past it where `x` is far from `a`. SciPy:
+/// `gammainc`.
+///
+/// ```nabi
+/// use special::gammainc;
+///
+/// assert((gammainc(1.0, 2.0) - (1.0 - (-2.0).exp())).abs() < 1e-16);
+/// assert((gammainc(0.5, 1.0) - 0.8427007929497149).abs() < 1e-15);
+/// ```
+pub fn gammainc(a: f64, x: f64) -> f64 {
+    if !(a > 0.0) || !(x >= 0.0) { return f64::NAN; }
+    gamma_pq(a, x).0
+}
+
+/// The regularized upper incomplete gamma function `Q(a, x) = 1 - P(a,
+/// x)`, accurate where it is small (the upper tail). SciPy:
+/// `gammaincc`.
+///
+/// ```nabi
+/// use special::gammaincc;
+///
+/// assert(((gammaincc(1.0, 30.0) - (-30.0).exp()) / (-30.0).exp()).abs() < 1e-15);
+/// ```
+pub fn gammaincc(a: f64, x: f64) -> f64 {
+    if !(a > 0.0) || !(x >= 0.0) { return f64::NAN; }
+    gamma_pq(a, x).1
+}
+
+/// `x` with `P(a, x) = p` (`lower`) or `Q(a, x) = p`: a Wilson-Hilferty
+/// or small-x first guess, then Halley's method with a bracket.
+pub(pkg) fn gamma_inv(a: f64, p: f64, lower: bool) -> f64 {
+    if !(a > 0.0) || !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+    let (pl, pu) = if lower { (p, 1.0 - p) } else { (1.0 - p, p) };
+    if pl == 0.0 { return 0.0; }
+    if pu == 0.0 { return f64::INFINITY; }
+    // P(a, x) ~ x^a / Gamma(a + 1) for small x, Q(a, x) ~ x^(a - 1) e^-x /
+    // Gamma(a) for large x; Wilson-Hilferty's cube for a > 1.
+    let x = 0.0;
+    if a > 1.0 {
+        let z = if pl < pu { ndtri(pl) } else { -ndtri(pu) };
+        let t = 1.0 - 1.0 / (9.0 * a) + z / (3.0 * a.sqrt());
+        x = a * t * t * t;
+    }
+    if !(x > 0.0) {
+        if pl <= pu {
+            x = ((pl.ln() + lgamma1p(a)) / a).exp();
+        } else {
+            let l = -pu.ln() - lgamma(a);
+            x = (l + (a - 1.0) * l.max(1.0).ln()).max(1e-3);
+        }
+    }
+    let (lo, hi) = (0.0, f64::INFINITY);
+    let lga = lgamma(a);
+    for _ in 0..100 {
+        let (pp, qq) = gamma_pq(a, x);
+        // f > 0 means x is too large.
+        let f = if pl <= pu { pp - pl } else { pu - qq };
+        if f == 0.0 { return x; }
+        if f > 0.0 { hi = x; } else { lo = x; }
+        let dens = ((a - 1.0) * x.ln() - x - lga).exp();
+        let nx = x;
+        if dens > 0.0 && dens.is_finite() {
+            let u = f / dens;
+            let h = (a - 1.0) / x - 1.0;
+            let corr = 1.0 - 0.5 * (u * h).clamp(-1.0, 1.0);
+            nx = x - u / corr;
+        }
+        if !(nx > lo && nx < hi) {
+            nx = if hi == f64::INFINITY { x * 2.0 } else { 0.5 * (lo + hi) };
+        }
+        if (nx - x).abs() <= EPS * nx.abs() { return nx; }
+        x = nx;
+    }
+    x
+}
+
+/// The inverse of `gammainc` in `x`: `P(a, x) = p`. Halley's method from
+/// a Wilson-Hilferty start; about 1e-15 relative. SciPy:
+/// `gammaincinv`.
+///
+/// ```nabi
+/// use special::{gammainc, gammaincinv};
+///
+/// let x = gammaincinv(3.0, 0.4);
+/// assert((gammainc(3.0, x) - 0.4).abs() < 1e-15);
+/// ```
+pub fn gammaincinv(a: f64, p: f64) -> f64 { gamma_inv(a, p, true) }
+
+/// The inverse of `gammaincc` in `x`: `Q(a, x) = q`, accurate for tiny
+/// `q`. SciPy: `gammainccinv`.
+///
+/// ```nabi
+/// use special::{gammaincc, gammainccinv};
+///
+/// let x = gammainccinv(2.0, 1e-20);
+/// assert(((gammaincc(2.0, x) - 1e-20) / 1e-20).abs() < 1e-13);
+/// ```
+pub fn gammainccinv(a: f64, q: f64) -> f64 { gamma_inv(a, q, false) }
+
+/// The trigamma function `psi'(x)`, `x > 0` (NaN otherwise):
+/// recurrence to `x >= 10`, then the asymptotic series. About 1e-15
+/// relative.
+///
+/// ```nabi
+/// use special::trigamma;
+///
+/// assert((trigamma(1.0) - 1.6449340668482264).abs() < 1e-15);
+/// ```
+pub fn trigamma(x: f64) -> f64 {
+    if !(x > 0.0) { return f64::NAN; }
+    if x == f64::INFINITY { return 0.0; }
+    let acc = 0.0;
+    let z = x;
+    while z < 10.0 {
+        acc += 1.0 / (z * z);
+        z += 1.0;
+    }
+    let r = 1.0 / z;
+    let r2 = r * r;
+    // 1/z + 1/(2z^2) + sum B_2k / z^(2k+1).
+    let t = r2 * (1.0 / 6.0 - r2 * (1.0 / 30.0 - r2 * (1.0 / 42.0 - r2 * (1.0 / 30.0 - r2 * (5.0 / 66.0 - r2 * (691.0 / 2730.0 - r2 * 7.0 / 6.0))))));
+    acc + r + 0.5 * r2 + r * t
+}

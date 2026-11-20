@@ -1,0 +1,247 @@
+// The logistic function, its inverse and the log-sum-exp family, in
+// the forms that neither overflow nor lose the small end: log1pexp by
+// Maechler's cut points (2012), logsumexp and softmax shifted by the
+// largest value so every exponential is at most 1, the shifted sum
+// added pairwise.
+
+use pkg::SpecialError;
+use pkg::error::arg;
+use core::array::Array;
+
+/// The logistic sigmoid `1 / (1 + e^-x)`, without overflow for any `x`
+/// and with full relative accuracy in the lower tail (`expit(-700)` is
+/// 9.86e-305). SciPy: `expit`.
+///
+/// ```nabi
+/// assert(special::expit(0.0) == 0.5);
+/// assert(special::expit(800.0) == 1.0 && special::expit(-800.0) == 0.0);
+/// ```
+pub fn expit(x: f64) -> f64 {
+    if x >= 0.0 { return 1.0 / (1.0 + (-x).exp()); }
+    let e = x.exp();
+    e / (1.0 + e)
+}
+
+/// The logit `ln(p / (1 - p))`, the inverse of `expit`, for `0 <= p <=
+/// 1` (NaN outside, `-inf` / `inf` at the ends). Through `2 atanh(2p -
+/// 1)` near 1/2 and `ln p - ln_1p(-p)` below 1/4, so both ends keep their
+/// digits. SciPy: `logit`.
+///
+/// ```nabi
+/// assert(special::logit(0.5) == 0.0);
+/// assert((special::logit(special::expit(-3.0)) + 3.0).abs() < 1e-15);
+/// ```
+pub fn logit(p: f64) -> f64 {
+    if !(p >= 0.0 && p <= 1.0) { return f64::NAN; }
+    if p < 0.25 { return p.ln() - (-p).ln_1p(); }
+    if p <= 0.75 { return 2.0 * (2.0 * p - 1.0).atanh(); }
+    // 1 - p is exact here.
+    (p / (1.0 - p)).ln()
+}
+
+/// `ln(1 + e^x)` (the softplus), exact to rounding for every `x`: `e^x`
+/// below -37, `ln_1p(e^x)` to 18, `x + e^-x` to 33.3 and `x` past it
+/// (Maechler 2012). SciPy: `log1p(exp(x))` without its overflow.
+///
+/// ```nabi
+/// assert(special::log1pexp(1000.0) == 1000.0);
+/// assert(special::log1pexp(-50.0) == (-50.0).exp());
+/// assert((special::log1pexp(0.0) - 2f64.ln()).abs() < 1e-16);
+/// ```
+pub fn log1pexp(x: f64) -> f64 {
+    if x <= -37.0 { return x.exp(); }
+    if x <= 18.0 { return x.exp().ln_1p(); }
+    if x <= 33.3 { return x + (-x).exp(); }
+    x
+}
+
+/// `ln(1 - e^-a)` for `a >= 0` (NaN below, `-inf` at 0): `ln(-expm1(-a))`
+/// up to ln 2 and `ln_1p(-e^-a)` past it, the split of Maechler (2012)
+/// that keeps both ends accurate.
+///
+/// ```nabi
+/// assert((special::log1mexp(1e-20) - 1e-20f64.ln()).abs() < 1e-14);
+/// assert(special::log1mexp(40.0) == -(-40.0).exp());
+/// ```
+pub fn log1mexp(a: f64) -> f64 {
+    if !(a >= 0.0) { return f64::NAN; }
+    if a <= 0.6931471805599453 { return (-(-a).exp_m1()).ln(); }
+    (-(-a).exp()).ln_1p()
+}
+
+/// `ln(expit(x)) = -log1pexp(-x)`, the log of the sigmoid without its
+/// underflow (`log_expit(-1000)` is -1000). SciPy: `log_expit`.
+///
+/// ```nabi
+/// assert(special::log_expit(-1000.0) == -1000.0);
+/// ```
+pub fn log_expit(x: f64) -> f64 { -log1pexp(-x) }
+
+/// `ln(e^a + e^b)` without overflow. NumPy: `logaddexp`.
+///
+/// ```nabi
+/// assert(special::logaddexp(1000.0, 1000.0) == 1000.0 + 2f64.ln());
+/// ```
+pub fn logaddexp(a: f64, b: f64) -> f64 {
+    if a != a || b != b { return f64::NAN; }
+    if a == b { return a + 0.6931471805599453; }
+    let m = a.max(b);
+    if m == f64::NEG_INFINITY { return m; }
+    m + log1pexp(-(a - b).abs())
+}
+
+/// The largest element `m` of a lane and `sum e^(x[i] - m)`, the
+/// exponentials left in `t` (reused across lanes, so nothing is
+/// allocated per lane). `m` is NaN or an infinity when the lane holds one.
+fn shift(xs: List<f64>, off: usize, n: usize, ref t: List<f64>) -> (f64, f64) {
+    t.clear();
+    let m = f64::NEG_INFINITY;
+    for i in off..off + n {
+        let x = xs[i];
+        if x != x { return (x, 1.0); }
+        if x > m { m = x; }
+    }
+    if m == f64::NEG_INFINITY || m == f64::INFINITY { return (m, 1.0); }
+    for i in off..off + n { t.push((xs[i] - m).exp()); }
+    (m, t.sum())
+}
+
+fn lse(xs: List<f64>, off: usize, n: usize, ref t: List<f64>) -> f64 {
+    let (m, s) = shift(xs, off, n, ref t);
+    m + s.ln()
+}
+
+/// `ln sum_i e^(x_i)` over every element of `a` (any rank), shifted by
+/// the largest so nothing overflows: within a few ulp of the exact
+/// value plus `n eps` from the sum. `-inf` for an empty array or one of
+/// `-inf`s, NaN if any element is NaN. SciPy: `logsumexp`.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let x: Vector<f64> = [1000, 1000, 1000];
+/// assert((special::logsumexp(x) - (1000.0 + 3f64.ln())).abs() < 1e-12);
+/// ```
+pub fn logsumexp<const N: usize>(a: Array<f64, N>) -> f64 {
+    let xs = a.to_list();
+    let t: List<f64> = List::with_capacity(xs.len());
+    lse(xs, 0, xs.len(), ref t)
+}
+
+/// Checks `axis` against the rank.
+fn axis_of(what: str, axis: usize, n: usize) throws (SpecialError) -> usize {
+    try arg(axis < n, f"{what}: axis {axis} of a rank-{n} array; pass 0..{n}, or leave it out for the last");
+    axis
+}
+
+/// The lanes of `a` along `axis` as one contiguous list, with the
+/// permutation that brought `axis` last.
+fn lanes<const N: usize>(a: Array<f64, N>, axis: usize) -> (List<f64>, [usize; N], usize) {
+    let order: [usize; N] = [0; N];
+    let j = 0usize;
+    for k in 0..N {
+        if k != axis {
+            order[j] = k;
+            j += 1;
+        }
+    }
+    order[N - 1] = axis;
+    (a.permute(order).copy().to_list(), order, a.shape()[axis])
+}
+
+/// `logsumexp` of each lane along `axis` (the last by default), giving an array of one rank less. Throws `InvalidArgument` for
+/// an axis past the rank.
+///
+/// ```nabi
+/// use core::array::Matrix;
+///
+/// let m: Matrix<f64> = [[0, 0], [1, 1]];
+/// let r = try special::logsumexp_axis(m, 1);
+/// assert((r[1] - (1.0 + 2f64.ln())).abs() < 1e-15);
+/// ```
+pub fn logsumexp_axis<const N: usize>(a: Array<f64, N>, axis: usize = N - 1) throws (SpecialError) -> Array<f64, { N - 1 }> {
+    let axis = try axis_of("logsumexp_axis", axis, N);
+    let s = a.shape();
+    let rest: [usize; N - 1] = [0; N - 1];
+    let j = 0usize;
+    for k in 0..N {
+        if k != axis {
+            rest[j] = s[k];
+            j += 1;
+        }
+    }
+    let (xs, _, len) = lanes(a, axis);
+    let count = 1usize;
+    for k in 0..N - 1 { count *= rest[k]; }
+    let out: List<f64> = List::with_capacity(count);
+    let t: List<f64> = List::with_capacity(len);
+    for l in 0..count { out.push(lse(xs, l * len, len, ref t)); }
+    Array::from_list(out, rest)
+}
+
+/// Softmax or its log along `axis`: the lanes in one contiguous list,
+/// each shifted by its largest value, then divided by (or less the log
+/// of) its sum.
+fn soft<const N: usize>(what: str, a: Array<f64, N>, axis: usize, log: bool) throws (SpecialError) -> Array<f64, N> {
+    let axis = try axis_of(what, axis, N);
+    let (xs, order, len) = lanes(a, axis);
+    let n = xs.len();
+    let count = if len == 0 { 0usize } else { n / len };
+    let out: List<f64> = List::with_capacity(n);
+    let t: List<f64> = List::with_capacity(len);
+    for l in 0..count {
+        let (m, sum) = shift(xs, l * len, len, ref t);
+        if t.len() < len {
+            // NaN or an infinity in the lane: the formula on it as it is.
+            let z = m + sum.ln();
+            for i in l * len..(l + 1) * len {
+                let v = xs[i] - z;
+                out.push(if log { v } else { v.exp() });
+            }
+            continue;
+        }
+        let ls = m + sum.ln();
+        for i in 0..len { out.push(if log { xs[l * len + i] - ls } else { t[i] / sum }); }
+    }
+    let s = a.shape();
+    let ps: [usize; N] = [0; N];
+    let back: [usize; N] = [0; N];
+    for k in 0..N {
+        ps[k] = s[order[k]];
+        back[order[k]] = k;
+    }
+    Array::from_list(out, ps).permute(back).copy()
+}
+
+/// The softmax `e^(x_i) / sum_j e^(x_j)` of each lane along `axis`
+/// (the last by default), each lane
+/// shifted by its largest value so nothing overflows; each value within
+/// 2 ulp, the lanes sum to 1 within a few ulp. Throws
+/// `InvalidArgument` for an axis past the rank. SciPy: `softmax`.
+///
+/// ```nabi
+/// use core::array::{Matrix, Vector};
+///
+/// let x: Vector<f64> = [1000, 1000];
+/// assert((try special::softmax(x)).to_list() == [0.5, 0.5]);
+/// let m: Matrix<f64> = [[1, 1], [0, 2]];
+/// let s = try special::softmax(m, 0);
+/// assert((s[0, 0] - special::expit(1.0)).abs() < 1e-16);
+/// ```
+pub fn softmax<const N: usize>(a: Array<f64, N>, axis: usize = N - 1) throws (SpecialError) -> Array<f64, N> {
+    try soft("softmax", a, axis, false)
+}
+
+/// The log of the softmax, `x_i - logsumexp(x)`, along `axis` (the last
+/// by default), accurate where the softmax underflows. SciPy:
+/// `log_softmax`.
+///
+/// ```nabi
+/// use core::array::Vector;
+///
+/// let x: Vector<f64> = [0, 1000];
+/// assert((try special::log_softmax(x))[0] == -1000.0);
+/// ```
+pub fn log_softmax<const N: usize>(a: Array<f64, N>, axis: usize = N - 1) throws (SpecialError) -> Array<f64, N> {
+    try soft("log_softmax", a, axis, true)
+}

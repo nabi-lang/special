@@ -1,0 +1,236 @@
+// The Riemann and Hurwitz zeta functions.
+//
+// zeta(s) - 1 / (s - 1) is entire; on -1/2 < s < 3 it is its Taylor series
+// about 1 with the Stieltjes constants, (-1)^n gamma_n / n! (24 terms,
+// below 1e-19 there). Past 3, zeta(s) - 1 and the Hurwitz zeta(s, q)
+// are the Euler-Maclaurin sum: n terms of (q + k)^-s, then the integral
+// and B_2j terms at a = q + n with a >= 0.6 (s + 30), which keeps the
+// B_2j terms falling fast. Below 0 the functional equation. All the terms
+// of the Hurwitz sum are positive for q > 0, so it keeps full relative
+// accuracy.
+
+use pkg::complex::{cgamma, cx, csinpi};
+use pkg::gammas::{digamma, gamma, lgamma, sinpi};
+use core::num::Complex;
+
+const PI: f64 = 3.141592653589793;
+const LN_2PI: f64 = 1.8378770664093453;
+const LN_PI: f64 = 1.1447298858494002;
+const EPS: f64 = 2.220446049250313e-16;
+
+// (-1)^n gamma_n / n!, n = 0..23 (gamma_n the Stieltjes constants).
+const STJ: [f64; 24] = [
+    0.5772156649015329, 0.07281584548367673, -0.00484518159643616, -0.00034230573671722433,
+    9.689041939447084e-05, -6.6110318108421895e-06, -3.316240908752772e-07, 1.0462094584479188e-07,
+    -8.733218100273798e-09, 9.47827778276236e-11, 5.658421927608708e-11, -6.768689863513697e-12,
+    3.4921159366720317e-13, 4.4104247417577536e-15, -2.3997862217709992e-15, 2.1677312200726828e-16,
+    -9.544466076366965e-18, -7.387676660538637e-20, 4.800850782488065e-20, -4.139956737713306e-21,
+    1.9168201593991233e-22, -2.0441543122262165e-24, -4.818498501107353e-25, 4.8118570515125666e-26,
+];
+
+// B_2j / (2j)!, j = 1..15.
+const EM: [f64; 15] = [
+    0.08333333333333333, -0.001388888888888889, 3.306878306878307e-05, -8.267195767195768e-07,
+    2.08767569878681e-08, -5.284190138687493e-10, 1.3382536530684679e-11, -3.3896802963225827e-13,
+    8.586062056277845e-15, -2.174868698558062e-16, 5.5090028283602295e-18, -1.3954464685812522e-19,
+    3.534707039629467e-21, -8.953517427037546e-23, 2.267952452337683e-24,
+];
+
+/// zeta(s) for -1/2 < s < 3, s != 1, by the series about 1.
+fn near_one(s: f64) -> f64 {
+    let t = s - 1.0;
+    let p = 0.0;
+    let k = 24usize;
+    while k > 0 {
+        k -= 1;
+        p = p * t + STJ[k];
+    }
+    1.0 / t + p
+}
+
+/// The Euler-Maclaurin tail at a: a^(1-s) / (s - 1) + a^-s / 2 + the
+/// B_2j terms, each scaled by `scale` (a^-s or (a / q)^-s).
+fn em_tail(s: f64, a: f64, p: f64) -> f64 {
+    let t = a * p / (s - 1.0) + 0.5 * p;
+    // B_2j / (2j)! s (s + 1) ... (s + 2j - 2) a^(-s - 2j + 1).
+    let f = p * s / a;
+    let r = 1.0 / (a * a);
+    for j in 0..15 {
+        let u = EM[j] * f;
+        t += u;
+        if u.abs() <= 0.25 * EPS * t.abs() { break; }
+        let k = 2.0 * j as f64;
+        f *= (s + k + 1.0) * (s + k + 2.0) * r;
+    }
+    t
+}
+
+/// The Hurwitz sum for s > 1, q > 0. With `scaled`, times q^s, for
+/// arguments whose value overflows or underflows. The terms run up to
+/// a = 0.6 (s + 30), where the B_2j terms fall by 0.07 or more each
+/// (they grow like (s + 2j)^2 / (2 pi a)^2), unless they have stopped
+/// counting first.
+fn em(s: f64, q: f64, scaled: bool) -> f64 {
+    let lim = 0.6 * (s + 30.0);
+    let sum = 0.0;
+    let a = q;
+    while a < lim {
+        let t = if scaled { (a / q).pow(-s) } else { a.pow(-s) };
+        sum += t;
+        a += 1.0;
+        // What is left is about t a / (s - 1).
+        if t * a <= 0.05 * EPS * (s - 1.0) * sum { return sum; }
+    }
+    sum + em_tail(s, a, if scaled { (a / q).pow(-s) } else { a.pow(-s) })
+}
+
+/// `zeta(s) - 1 = sum_{k >= 2} k^-s` for real s >= 3.
+fn zetac_big(s: f64) -> f64 {
+    if s >= 60.0 {
+        // The terms fall at least like (2/3)^60 each step.
+        let sum = 0.0;
+        let k = 2.0;
+        loop {
+            let t = k.pow(-s);
+            sum += t;
+            if t <= 0.25 * EPS * sum { break; }
+            k += 1.0;
+        }
+        return sum;
+    }
+    em(s, 2.0, false)
+}
+
+/// zeta(s) for s < 0 by the functional equation zeta(s) = 2^s pi^(s - 1)
+/// sin(pi s / 2) Gamma(1 - s) zeta(1 - s).
+fn reflect(s: f64) -> f64 {
+    let sn = sinpi(0.5 * s);
+    if sn == 0.0 { return 0.0; }
+    // 1 - s as t + tl: rounding t alone would cost psi(t) ulp(t) in
+    // Gamma(t), 1e-14 at s = -31.
+    let t = 1.0 - s;
+    let tl = (1.0 - t) - s;
+    let z = zeta(t);
+    let c = digamma(t) * tl;
+    if t < 171.0 { return (2.0 * PI).pow(s) / PI * sn * (gamma(t) * (1.0 + c)) * z; }
+    // Gamma(1 - s) overflows: add the logs.
+    let l = s * LN_2PI - LN_PI + (lgamma(t) + c) + z.ln() + sn.abs().ln();
+    let m = l.exp();
+    if sn < 0.0 { -m } else { m }
+}
+
+/// The Riemann zeta function `zeta(s) = sum_{k >= 1} k^-s`, continued to
+/// every real `s`: `inf` at the pole `s = 1`, exactly 0 at the negative
+/// even integers, `-1/2` at 0. About 2 ulp for `s > -1/2` (the
+/// Stieltjes series on (-1/2, 3), Euler-Maclaurin past it); below, the
+/// functional equation, whose powers of `2 pi` cost about `|s| eps / 20`
+/// (MEAS); overflows to `+-inf` below about -260. SciPy: `zeta(s)`.
+///
+/// ```nabi
+/// assert((special::zeta(2.0) - 1.6449340668482264).abs() < 3e-16);
+/// assert(special::zeta(0.0) == -0.5 && special::zeta(-2.0) == 0.0);
+/// assert((special::zeta(-1.0) + 1.0 / 12.0).abs() < 1e-17);
+/// assert(special::zeta(1.0) == f64::INFINITY);
+/// ```
+pub fn zeta(s: f64) -> f64 {
+    if s != s { return s; }
+    if s == 1.0 { return f64::INFINITY; }
+    if s == f64::INFINITY { return 1.0; }
+    if s == f64::NEG_INFINITY { return f64::NAN; }
+    if s <= -0.5 { return reflect(s); }
+    if s < 3.0 { return near_one(s); }
+    1.0 + zetac_big(s)
+}
+
+/// `zeta(s) - 1`, with full relative accuracy as it falls to 0 for
+/// large `s` (`zetac(100)` is 7.9e-31). SciPy: `zetac`.
+///
+/// ```nabi
+/// assert(((special::zetac(60.0) - 8.673617380119934e-19) / 8.673617380119934e-19).abs() < 1e-15);
+/// assert(special::zetac(0.0) == -1.5);
+/// ```
+pub fn zetac(s: f64) -> f64 {
+    if s != s { return s; }
+    if s == f64::INFINITY { return 0.0; }
+    if s >= 3.0 { return zetac_big(s); }
+    zeta(s) - 1.0
+}
+
+/// The Hurwitz zeta function `zeta(s, q) = sum_{k >= 0} (q + k)^-s` for
+/// `s > 1` (`inf` at `s = 1`, NaN below, as SciPy). `q > 0` keeps every
+/// term positive: about 3 ulp (6.2e-16 measured, Euler-Maclaurin). For `q <= 0` the sum
+/// runs over the shifted terms when `s` is an integer (`inf` when `q`
+/// is a pole, the terms of mixed sign then cost absolute accuracy) and
+/// is NaN otherwise. SciPy: `zeta(s, q)`.
+///
+/// ```nabi
+/// assert((special::hurwitz(2.0, 1.0) - special::zeta(2.0)).abs() < 3e-16);
+/// // zeta(s, 1/2) = (2^s - 1) zeta(s).
+/// assert((special::hurwitz(3.0, 0.5) - 7.0 * special::zeta(3.0)).abs() < 2e-15);
+/// ```
+pub fn hurwitz(s: f64, q: f64) -> f64 {
+    if s != s || q != q { return f64::NAN; }
+    if s == 1.0 { return f64::INFINITY; }
+    if !(s > 1.0) { return f64::NAN; }
+    if q == f64::INFINITY { return 0.0; }
+    if q > 0.0 { return em(s, q, false); }
+    if q == q.floor() { return f64::INFINITY; }
+    if s != s.floor() { return f64::NAN; }
+    // (q + k)^-s for the k that bring q above 0, with the sign of an odd
+    // power of a negative base.
+    let odd = s % 2.0 == 1.0;
+    let sum = 0.0;
+    let a = q;
+    while a < 0.0 {
+        let t = (-a).pow(-s);
+        sum += if odd { -t } else { t };
+        a += 1.0;
+    }
+    sum + em(s, a, false)
+}
+
+/// `ln zeta(s, q)` for s > 1, q > 1 whose zeta(s, q) underflows.
+pub(pkg) fn ln_hurwitz(s: f64, q: f64) -> f64 { -s * q.ln() + em(s, q, true).ln() }
+
+/// The Riemann zeta function of a complex argument: Euler-Maclaurin
+/// with `n >= 10 + |Im s|` terms (and `0.6 (|s| + 30)`) for `Re s >= 1/2` and the functional
+/// equation below. About 1e-15 relative for `Re s >= 2`; in and left of
+/// the critical strip the terms cancel, to about 1e-14 of `|zeta(s)|`
+/// for `|Im s|` up to 40 (3e-14 measured), more past it. The cost grows
+/// like `|Im s|`. `inf` at `s = 1`. SciPy has no complex zeta; mpmath: `zeta`.
+///
+/// ```nabi
+/// let z = special::czeta(0.5 + 14.134725141734693i);
+/// assert(z.abs() < 1e-14);
+/// let w = special::czeta(2.0 + 0.0i);
+/// assert((w.re - 1.6449340668482264).abs() < 3e-16);
+/// ```
+pub fn czeta(s: Complex<f64>) -> Complex<f64> {
+    if s.is_nan() { return cx(f64::NAN, f64::NAN); }
+    if s.im == 0.0 { return cx(zeta(s.re), 0.0); }
+    if s.re < 0.5 {
+        // zeta(s) = 2^s pi^(s - 1) sin(pi s / 2) Gamma(1 - s) zeta(1 - s).
+        let t = 1.0 - s;
+        let f = (s * LN_2PI - LN_PI).exp() * csinpi(0.5 * s);
+        return f * cgamma(t) * czeta(t);
+    }
+    let n = (10.0 + s.im.abs()).max(0.6 * (s.abs() + 30.0)).floor();
+    let sum = cx(0.0, 0.0);
+    let k = 1.0;
+    while k < n {
+        sum = sum + (-s * k.ln()).exp();
+        k += 1.0;
+    }
+    let p = (-s * n.ln()).exp();
+    let t = n * p / (s - 1.0) + 0.5 * p;
+    let f = p * s / n;
+    let r = 1.0 / (n * n);
+    for j in 0..15 {
+        let u = EM[j] * f;
+        t = t + u;
+        if u.abs() <= 0.25 * EPS * t.abs() { break; }
+        let m = 2.0 * j as f64;
+        f = f * (s + m + 1.0) * (s + m + 2.0) * r;
+    }
+    sum + t
+}

@@ -1,0 +1,394 @@
+// The Faddeeva function w(z) = e^-z^2 erfc(-iz) and the error functions
+// of a complex argument built on it, with the scaled erfcx, erfi and
+// Dawson's integral of a real one.
+//
+// w(z) for Im z >= 0 (w(z) = 2 e^-z^2 - w(-z) below) follows S. G.
+// Johnson's Faddeeva package: Laplace's continued fraction, evaluated
+// bottom up with a term count fitted to reach full precision, for |z|
+// large or Im z >= 2, and elsewhere the sums of Zaghloul and Ali's
+// Algorithm 916 (2011) with a = pi / sqrt(-ln(eps / 2)), whose error is
+// e^(-pi^2 / a^2) = eps / 2. On the real axis Re w(x) = e^-x^2 exactly
+// and Im w(x) = 2 D(x) / sqrt(pi) by the same two methods.
+
+use pkg::complex::cx;
+use pkg::normal::{erf, erfc};
+use core::num::Complex;
+
+const SQRT_PI: f64 = 1.7724538509055160;
+const FRAC_1_SQRT_PI: f64 = 0.5641895835477563;
+const FRAC_2_SQRT_PI: f64 = 1.1283791670955126;
+const EPS: f64 = 2.220446049250313e-16;
+// Algorithm 916's step a, 2a / pi and a^2.
+const A: f64 = 0.5183214804300859;
+const C: f64 = 0.32997370288462907;
+const A2: f64 = 0.26865715707523595;
+// e^(-a^2 n^2) for n = 1..51; past 51 it underflows.
+const EA2N2: [f64; 51] = [
+    0.7644052816712216, 0.3414245271665484, 0.08910726469294125, 0.013588729905546009,
+    0.0012108545525343747, 6.304526139334493e-05, 1.9180515657711467e-06, 3.409694477148324e-08,
+    3.541750890994694e-10, 2.149650795832607e-12, 7.623689118337244e-15, 1.579827971106811e-17,
+    1.9129418910358267e-20, 1.3534465676420535e-23, 5.595357124285887e-27, 1.3516425797240177e-30,
+    1.9078458284350117e-34, 1.5735192029144294e-38, 7.583124323280329e-43, 2.1353627543869708e-47,
+    3.513520637871958e-52, 3.378008302663969e-57, 1.89769439468301e-62, 6.229299260726688e-68,
+    1.1948117200693873e-73, 1.3390818113300596e-79, 8.769243034832239e-86, 3.35555576166255e-92,
+    7.50264110688173e-99, 9.801922007454103e-106, 7.482654128222689e-113, 3.337701225668094e-120,
+    8.699345981598611e-128, 1.3248695148408885e-135, 1.1789814420131525e-143, 6.1303912023618e-152,
+    1.862587859508221e-160, 3.3066840820143276e-169, 3.4301728088794625e-178, 2.0791539777580822e-187,
+    7.36384545323985e-197, 1.5239476039408574e-206, 1.842819350465321e-216, 1.3020955380299293e-226,
+    5.375889035210805e-237, 1.2968958459976315e-247, 1.8281307802286657e-258, 1.5057635534868423e-269,
+    7.246923207992942e-281, 2.037970513147268e-292, 3.3488021592787382e-304,
+];
+
+/// `e^-x^2` with the square carried as two doubles, so the result keeps
+/// full relative accuracy (x^2 rounded would cost x^2 eps).
+pub(pkg) fn exp_neg_sq(x: f64) -> f64 {
+    let h = x * x;
+    let l = x.mul_add(x, -h);
+    (-h).exp() * (1.0 - l)
+}
+
+/// `e^(x^2)`, as `exp_neg_sq`; split in two so `e^(x^2) / x` does not
+/// overflow before it has to.
+fn exp_sq(x: f64) -> f64 {
+    let h = x * x;
+    let l = x.mul_add(x, -h);
+    (h * 0.5).exp() * ((h * 0.5).exp() * (1.0 + l))
+}
+
+/// `e^-z^2`, with `x^2 - y^2` as `(x - y)(x + y)`.
+fn cexp_neg_sq(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    let m = ((y - x) * (x + y)).exp();
+    let t = -2.0 * x * y;
+    cx(m * t.cos(), m * t.sin())
+}
+
+/// The continued fraction's term count for |z| = r.
+fn terms(x: f64, y: f64) -> f64 {
+    let r = x.hypot(y);
+    let n = 8.0 + 40.0 / r + 200.0 / (r * r);
+    if r < 30.0 { n += 8.0 / (y + 0.3); }
+    n.floor() + 1.0
+}
+
+/// w(z) for x >= 0, y >= 0 by Laplace's continued fraction
+/// i / sqrt(pi) / (z - (1/2) / (z - 1 / (z - (3/2) / (z - ...)))).
+fn w_cf(x: f64, y: f64) -> Complex<f64> {
+    let (wr, wi) = (x, y);
+    let k = 0.5 * (terms(x, y) - 1.0);
+    while k > 0.4 {
+        let d = k / (wr * wr + wi * wi);
+        wr = x - wr * d;
+        wi = y + wi * d;
+        k -= 0.5;
+    }
+    let d = FRAC_1_SQRT_PI / (wr * wr + wi * wi);
+    cx(d * wi, d * wr)
+}
+
+/// `1 / g` with `g = y + (1/2) / (y + 1 / (y + (3/2) / ...))`: the
+/// continued fraction on the imaginary axis, `erfcx(y) sqrt(pi)`.
+fn erfcx_cf(y: f64) -> f64 {
+    let g = y;
+    let k = 0.5 * (terms(0.0, y) - 1.0);
+    while k > 0.4 {
+        g = y + k / g;
+        k -= 0.5;
+    }
+    1.0 / g
+}
+
+/// The sums of Algorithm 916 for x >= 0, 0 <= y < 2 (times e^x^2 where
+/// they carry the factor e^-x^2): (s1, s2 + s3, s5 - s4).
+fn sums(x: f64, y: f64) -> (f64, f64, f64) {
+    let (s1, s23, s54) = (0.0, 0.0, 0.0);
+    let y2 = y * y;
+    let n = 1.0;
+    while n < 1000.0 {
+        let an = A * n;
+        let d = A2 * n * n + y2;
+        let e = if n <= 51.0 { EA2N2[n as usize - 1] / d } else { 0.0 };
+        let em = (-(an - x) * (an - x)).exp() / d;
+        let ep = (-(an + x) * (an + x)).exp() / d;
+        s1 += e;
+        s23 += em + ep;
+        // s5 - s4 = sum an (e^-(an - x)^2 - e^-(an + x)^2) / d; for small
+        // x as 2 an e^-a^2n^2 sinh(2anx) e^-x^2, without the cancellation.
+        s54 += if x > 1.0 { an * (em - ep) } else { 2.0 * an * e * (2.0 * an * x).sinh() * exp_neg_sq(x) };
+        if an > x && em <= 0.1 * EPS * s23 && e <= 0.1 * EPS * s1 { break; }
+        n += 1.0;
+    }
+    (s1, s23, s54)
+}
+
+/// `sin t / t`.
+fn sinc(t: f64, s: f64) -> f64 { if t == 0.0 { 1.0 } else { s / t } }
+
+/// w(z) for x >= 0, 0 < y < 2 by Algorithm 916.
+fn w_916(x: f64, y: f64) -> Complex<f64> {
+    let ex2 = exp_neg_sq(x);
+    let (s1, s23, s54) = sums(x, y);
+    let coef1 = ex2 * (erfcx(y) - C * y * s1);
+    let coef2 = C * x * ex2;
+    let xy = x * y;
+    let sxy = xy.sin();
+    let (s2, c2) = ((2.0 * xy).sin(), (2.0 * xy).cos());
+    let re = coef1 * c2 + coef2 * sxy * sinc(xy, sxy) + 0.5 * C * y * s23;
+    let im = coef2 * sinc(2.0 * xy, s2) - coef1 * s2 + 0.5 * C * s54;
+    cx(re, im)
+}
+
+/// Im w(x) = 2 D(x) / sqrt(pi) for real x >= 0.
+fn im_w(x: f64) -> f64 {
+    if x >= 1e8 { return FRAC_1_SQRT_PI / x; }
+    if x >= 6.5 { return w_cf(x, 0.0).im; }
+    let (_, _, s54) = sums(x, 0.0);
+    C * x * exp_neg_sq(x) + 0.5 * C * s54
+}
+
+/// w(z) for Im z >= 0, Re z >= 0.
+fn w_upper(x: f64, y: f64) -> Complex<f64> {
+    if x.max(y) >= 1e8 {
+        // i / (sqrt(pi) z): the next term is below 1e-16 of it. Scaled,
+        // so |z|^2 does not overflow.
+        let s = x.max(y);
+        let (u, v) = (x / s, y / s);
+        let d = FRAC_1_SQRT_PI / (s * (u * u + v * v));
+        return cx(v * d, if y == 0.0 { FRAC_1_SQRT_PI / x } else { u * d });
+    }
+    if y == 0.0 { return cx(exp_neg_sq(x), im_w(x)); }
+    if y >= 2.0 || (x >= 6.0 && y >= 0.5) || (x >= 7.0 && y >= 0.1) || (x >= 8.0 && y >= 1e-10) || x >= 28.0 {
+        return w_cf(x, y);
+    }
+    w_916(x, y)
+}
+
+/// The Faddeeva function `w(z) = e^-z^2 erfc(-iz)`, the plasma
+/// dispersion function up to a factor and the Voigt profile `Re w`.
+/// In the upper half plane about 7e-16 of |w| and 2e-15 in each part
+/// (measured against mpmath over 1000 points, |z| from 1e-6 to 1e4),
+/// except Im w for |Re z| below 0.01 and Im z between 1 and 2, where it
+/// is 1e-14 of Im w but 1e-17 of |w|. In the lower half plane `2 e^-z^2
+/// - w(-z)`, as well conditioned as `e^-z^2` (about |z|^2 eps), which
+/// overflows to infinity past `Im z` of about -26. SciPy: `wofz`.
+///
+/// ```nabi
+/// let w = special::wofz(1.0 + 1.0i);
+/// assert((w.re - 0.3047442052569126).abs() < 1e-15 && (w.im - 0.20821893820283163).abs() < 1e-15);
+/// assert(special::wofz(0.0i).re == 1.0);
+/// ```
+pub fn wofz(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    if z.is_nan() { return cx(f64::NAN, f64::NAN); }
+    if y < 0.0 {
+        let m = cexp_neg_sq(z);
+        return 2.0 * m - wofz(-z);
+    }
+    if x.is_infinite() || y.is_infinite() { return cx(0.0, 0.0); }
+    let w = w_upper(x.abs(), y);
+    if x < 0.0 { w.conj() } else { w }
+}
+
+/// The scaled complementary error function `erfcx(x) = e^(x^2)
+/// erfc(x)`, which falls like `1 / (x sqrt(pi))` where erfc underflows.
+/// About 2 ulp (3.4e-16 measured; the continued fraction from 2, `e^(x^2)
+/// erfc(x)` with the square in two parts below); overflows to `inf`
+/// below -26.6. SciPy: `erfcx`.
+///
+/// ```nabi
+/// assert(special::erfcx(0.0) == 1.0);
+/// assert((special::erfcx(30.0) - 0.018795888861416751).abs() < 4e-18);
+/// assert((special::erfcx(1.0) - 0.42758357615580700).abs() < 2e-16);
+/// ```
+pub fn erfcx(x: f64) -> f64 {
+    if x != x { return x; }
+    if x < 0.0 {
+        if x < -26.7 { return f64::INFINITY; }
+        return 2.0 * exp_sq(x) - erfcx(-x);
+    }
+    if x == f64::INFINITY { return 0.0; }
+    if x >= 2.0 { return FRAC_1_SQRT_PI * erfcx_cf(x); }
+    exp_sq(x) * erfc(x)
+}
+
+/// Dawson's integral `D(x) = e^-x^2 int_0^x e^t^2 dt = sqrt(pi) / 2 Im
+/// w(x)`. About 3 ulp (6.7e-16 measured), and `1 / (2x)` to double
+/// precision past 1e8. SciPy: `dawsn`.
+///
+/// ```nabi
+/// assert((special::dawson(1.0) - 0.53807950691276842).abs() < 2e-16);
+/// assert(special::dawson(-2.0) == -special::dawson(2.0));
+/// ```
+pub fn dawson(x: f64) -> f64 {
+    if x != x { return x; }
+    let a = x.abs();
+    if a == f64::INFINITY { return 0.0 * x.signum(); }
+    let d = 0.5 * SQRT_PI * im_w(a);
+    if x < 0.0 { -d } else { d }
+}
+
+/// The imaginary error function `erfi(x) = -i erf(ix) = 2 / sqrt(pi)
+/// int_0^x e^t^2 dt`, as `e^(x^2) Im w(x)`: about 4 ulp (8.5e-16
+/// measured), `inf` past 26.6. SciPy: `erfi`.
+///
+/// ```nabi
+/// assert((special::erfi(1.0) - 1.6504257587975428).abs() < 2e-15);
+/// assert(special::erfi(0.0) == 0.0);
+/// ```
+pub fn erfi(x: f64) -> f64 {
+    if x != x { return x; }
+    let a = x.abs();
+    if a < 1e-8 { return FRAC_2_SQRT_PI * x; }
+    let r = if a > 26.7 { f64::INFINITY } else { exp_sq(a) * im_w(a) };
+    if x < 0.0 { -r } else { r }
+}
+
+/// erf(z) by its Maclaurin series, for |z| <= 1.
+fn erf_series(z: Complex<f64>) -> Complex<f64> {
+    let z2 = z * z;
+    let t = z;
+    let s = z;
+    let n = 1.0;
+    while n < 60.0 {
+        t = t * (-z2) / n;
+        let u = t / (2.0 * n + 1.0);
+        s = s + u;
+        if u.abs() <= 0.5 * EPS * s.abs() { break; }
+        n += 1.0;
+    }
+    FRAC_2_SQRT_PI * s
+}
+
+/// The error function of a complex argument: the series for `|z| <=
+/// 1`, `1 - e^-z^2 w(iz)` beyond (odd in z), the real `erf` on the real
+/// axis and `i erfi(y)` on the imaginary one. About 1e-15 relative to
+/// `|erf z|`; near its complex zeros the error is absolute. SciPy:
+/// `erf` of a complex argument.
+///
+/// ```nabi
+/// let e = special::cerf(1.0 + 1.0i);
+/// assert((e.re - 1.3161512816979476).abs() < 1e-15 && (e.im - 0.19045346923783471).abs() < 1e-15);
+/// ```
+pub fn cerf(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 { return cx(erf(z.re), z.im); }
+    if z.re == 0.0 { return cx(z.re, erfi(z.im)); }
+    if z.abs() <= 1.0 { return erf_series(z); }
+    if z.re < 0.0 { return -cerf(-z); }
+    1.0 - cexp_neg_sq(z) * wofz(cx(-z.im, z.re))
+}
+
+/// The complementary error function of a complex argument, `e^-z^2
+/// w(iz)` for `Re z >= 0` and `2 - e^-z^2 w(-iz)` left of it; the real
+/// `erfc` on the real axis. About 1e-15 relative. SciPy: `erfc` of a
+/// complex argument.
+///
+/// ```nabi
+/// let e = special::cerfc(1.0 + 1.0i);
+/// assert((e.re + 0.31615128169794764).abs() < 1e-15 && (e.im + 0.19045346923783471).abs() < 1e-15);
+/// ```
+pub fn cerfc(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 { return cx(erfc(z.re), -z.im); }
+    if z.re >= 0.0 { return cexp_neg_sq(z) * wofz(cx(-z.im, z.re)); }
+    2.0 - cexp_neg_sq(z) * wofz(cx(z.im, -z.re))
+}
+
+/// `erfcx(z) = e^(z^2) erfc(z) = w(iz)` for complex `z`. SciPy: `erfcx`
+/// of a complex argument.
+///
+/// ```nabi
+/// let e = special::cerfcx(2.0 + 0.0i);
+/// assert((e.re - special::erfcx(2.0)).abs() < 1e-17);
+/// ```
+pub fn cerfcx(z: Complex<f64>) -> Complex<f64> {
+    if z.im == 0.0 { return cx(erfcx(z.re), -z.im); }
+    wofz(cx(-z.im, z.re))
+}
+
+/// `erfi(z) = -i erf(iz)` for complex `z`. SciPy: `erfi` of a complex
+/// argument.
+///
+/// ```nabi
+/// let e = special::cerfi(1.0 + 0.0i);
+/// assert((e.re - special::erfi(1.0)).abs() < 4e-16 && e.im == 0.0);
+/// ```
+pub fn cerfi(z: Complex<f64>) -> Complex<f64> {
+    let e = cerf(cx(-z.im, z.re));
+    cx(e.im, -e.re)
+}
+
+/// `D'(x) = 1 - 2x D(x)`. That cancels for large x, where the continued
+/// fraction gives it as -(1/2) / (f1 f) with f = x - (1/2) / f1, f1 = x -
+/// 1 / (x - (3/2) / ...).
+fn dprime(x: f64, d: f64) -> f64 {
+    let a = x.abs();
+    if a < 6.5 { return 1.0 - 2.0 * x * d; }
+    let g = a;
+    let k = 0.5 * (terms(a, 0.0) - 1.0);
+    while k > 0.9 {
+        g = a - k / g;
+        k -= 0.5;
+    }
+    -0.5 / (g * (a - 0.5 / g))
+}
+
+/// `D(z)` near the real axis by its Taylor series in `iy` about `x`:
+/// `D' = 1 - 2zD`, `D^(k+1) = -2z D^(k) - 2k D^(k-1)`.
+fn dawson_near_real(x: f64, y: f64) -> Complex<f64> {
+    let d0 = dawson(x);
+    let d1 = dprime(x, d0);
+    let (dm, dk) = (d0, d1);
+    let s = cx(d0, 0.0);
+    let p = cx(1.0, 0.0);
+    let iy = cx(0.0, y);
+    let k = 1.0;
+    while k < 60.0 {
+        p = p * iy / k;
+        let t = p * dk;
+        s = s + t;
+        if t.abs() <= 0.25 * EPS * s.abs() { break; }
+        let next = -2.0 * x * dk - 2.0 * k * dm;
+        dm = dk;
+        dk = next;
+        k += 1.0;
+    }
+    s
+}
+
+/// Dawson's integral of a complex argument, `D(z) = sqrt(pi) / 2 i
+/// (e^-z^2 - w(z))`: its Maclaurin series for `|z| < 1`, the Taylor
+/// series in `iy` about the real axis for `|Im z| < 0.05` (where the
+/// difference cancels), the difference elsewhere. About 1e-15 relative
+/// to `|D(z)|` (Im D relative 1e-14 within 0.05 of the real axis for
+/// `1 < |x| < 6.5`). SciPy: `dawsn` of a complex argument.
+///
+/// ```nabi
+/// let d = special::cdawson(1.0 + 1.0i);
+/// assert((d.re - 0.9903730923223614).abs() < 1e-15 && (d.im + 0.6388730515644433).abs() < 1e-15);
+/// ```
+pub fn cdawson(z: Complex<f64>) -> Complex<f64> {
+    if z.is_nan() { return cx(f64::NAN, f64::NAN); }
+    if z.im == 0.0 { return cx(dawson(z.re), z.im); }
+    if z.im < 0.0 { return -cdawson(-z); }
+    if z.abs() < 1.0 {
+        // D(z) = sum (-1)^n 2^n z^(2n+1) / (2n+1)!!.
+        let z2 = -2.0 * z * z;
+        let t = z;
+        let s = z;
+        let n = 1.0;
+        while n < 80.0 {
+            t = t * z2 / (2.0 * n + 1.0);
+            s = s + t;
+            if t.abs() <= 0.5 * EPS * s.abs() { break; }
+            n += 1.0;
+        }
+        return s;
+    }
+    if z.im < 0.05 && z.re.abs() < 8.0 { return dawson_near_real(z.re, z.im); }
+    if z.im < 1e-20 {
+        // y^2 D'' / 2 is below the rounding of D(x) here.
+        let d = dawson(z.re);
+        return cx(d, z.im * dprime(z.re, d));
+    }
+    let d = cexp_neg_sq(z) - wofz(z);
+    0.5 * SQRT_PI * cx(-d.im, d.re)
+}

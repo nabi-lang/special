@@ -1,0 +1,234 @@
+// Carlson's symmetric elliptic integrals for real arguments by the
+// duplication theorem (Carlson 1995, "Numerical computation of real or
+// complex elliptic integrals"): each step moves the arguments toward
+// their mean by a factor 4, and once they agree to (3 eps)^(1/6)
+// relative the fifth-order Taylor series about the mean finishes, so
+// the result is within a few ulp. About 6 to 12 steps for any input.
+
+use pkg::elliptic::legendre::e_of;
+
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `R_C(x, y) = R_F(x, y, y)`, `x >= 0`, `y != 0` (NaN otherwise); the
+/// Cauchy principal value for `y < 0`. Duplication with the series to
+/// s^7; about 2 ulp. SciPy: `elliprc`.
+///
+/// ```nabi
+/// // R_C(0, 1/4) = pi, R_C(9/4, 2) = ln 2.
+/// assert((special::elliprc(0.0, 0.25) - 3.141592653589793).abs() < 1e-15);
+/// assert((special::elliprc(2.25, 2.0) - 2f64.ln()).abs() < 4e-16);
+/// ```
+pub fn elliprc(x: f64, y: f64) -> f64 {
+    if !(x >= 0.0) || y != y || y == 0.0 { return f64::NAN; }
+    if y < 0.0 {
+        // R_C(x, y) = sqrt(x / (x - y)) R_C(x - y, -y).
+        return (x / (x - y)).sqrt() * rc(x - y, -y);
+    }
+    rc(x, y)
+}
+
+pub(pkg) fn rc(x: f64, y: f64) -> f64 {
+    if x == f64::INFINITY || y == f64::INFINITY { return 0.0; }
+    if x == 0.0 && y == 0.0 { return f64::INFINITY; }
+    let a0 = (x + 2.0 * y) / 3.0;
+    let q = (3.0 * EPS).pow(-1.0 / 8.0) * (a0 - x).abs();
+    let (xn, yn, an) = (x, y, a0);
+    let k = 0;
+    while q >= an.abs() && k < 100 {
+        let lam = 2.0 * xn.sqrt() * yn.sqrt() + yn;
+        an = 0.25 * (an + lam);
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        q *= 0.25;
+        k += 1;
+    }
+    let s = (yn - an) / an;
+    let s2 = s * s;
+    let poly = 1.0 + s2 * (0.3 + s * (1.0 / 7.0 + s * (0.375 + s * (9.0 / 22.0 + s * (159.0 / 208.0 + s * 1.125)))));
+    poly / an.sqrt()
+}
+
+/// `R_F(x, y, z)`, `x, y, z >= 0` with at most one of them 0 (`inf` when
+/// two are, NaN for a negative one). Duplication and the fifth-order
+/// series; about 2 ulp. SciPy: `elliprf`.
+///
+/// ```nabi
+/// // R_F(0, 1, 2) = K(1/2).
+/// assert((special::elliprf(0.0, 1.0, 2.0) - 1.3110287771460600).abs() < 1e-15);
+/// assert(special::elliprf(1.0, 1.0, 1.0) == 1.0);
+/// ```
+pub fn elliprf(x: f64, y: f64, z: f64) -> f64 {
+    if !(x >= 0.0) || !(y >= 0.0) || !(z >= 0.0) { return f64::NAN; }
+    rf(x, y, z)
+}
+
+pub(pkg) fn rf(x: f64, y: f64, z: f64) -> f64 {
+    let zeros = (if x == 0.0 { 1 } else { 0 }) + (if y == 0.0 { 1 } else { 0 }) + (if z == 0.0 { 1 } else { 0 });
+    if zeros >= 2 { return f64::INFINITY; }
+    if x == f64::INFINITY || y == f64::INFINITY || z == f64::INFINITY { return 0.0; }
+    let a0 = (x + y + z) / 3.0;
+    let q = (3.0 * EPS).pow(-1.0 / 6.0) * (a0 - x).abs().max((a0 - y).abs()).max((a0 - z).abs());
+    let (xn, yn, zn, an) = (x, y, z, a0);
+    let k = 0;
+    while q >= an.abs() && k < 100 {
+        let (sx, sy, sz) = (xn.sqrt(), yn.sqrt(), zn.sqrt());
+        let lam = sx * sy + sx * sz + sy * sz;
+        an = 0.25 * (an + lam);
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+        q *= 0.25;
+        k += 1;
+    }
+    let dx = (an - xn) / an;
+    let dy = (an - yn) / an;
+    let dz = -(dx + dy);
+    let e2 = dx * dy - dz * dz;
+    let e3 = dx * dy * dz;
+    (1.0 - e2 / 10.0 + e3 / 14.0 + e2 * e2 / 24.0 - 3.0 * e2 * e3 / 44.0) / an.sqrt()
+}
+
+/// `R_D(x, y, z) = R_J(x, y, z, z)`, `x, y >= 0` (not both 0), `z > 0`
+/// (NaN otherwise). Duplication and the fifth-order series; about 3
+/// ulp. SciPy: `elliprd`.
+///
+/// ```nabi
+/// assert((special::elliprd(0.0, 2.0, 1.0) - 1.7972103521033884).abs() < 1e-15);
+/// ```
+pub fn elliprd(x: f64, y: f64, z: f64) -> f64 {
+    if !(x >= 0.0) || !(y >= 0.0) || !(z > 0.0) { return f64::NAN; }
+    rd(x, y, z)
+}
+
+pub(pkg) fn rd(x: f64, y: f64, z: f64) -> f64 {
+    if x == 0.0 && y == 0.0 { return f64::INFINITY; }
+    if x == f64::INFINITY || y == f64::INFINITY || z == f64::INFINITY { return 0.0; }
+    let a0 = (x + y + 3.0 * z) / 5.0;
+    let q = (0.25 * EPS).pow(-1.0 / 6.0) * (a0 - x).abs().max((a0 - y).abs()).max((a0 - z).abs());
+    let (xn, yn, zn, an) = (x, y, z, a0);
+    let sum = 0.0;
+    let fac = 1.0;
+    let k = 0;
+    while q >= an.abs() && k < 100 {
+        let (sx, sy, sz) = (xn.sqrt(), yn.sqrt(), zn.sqrt());
+        let lam = sx * sy + sx * sz + sy * sz;
+        sum += fac / (sz * (zn + lam));
+        fac *= 0.25;
+        an = 0.25 * (an + lam);
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+        q *= 0.25;
+        k += 1;
+    }
+    let dx = (an - xn) / an;
+    let dy = (an - yn) / an;
+    let dz = -(dx + dy) / 3.0;
+    let xy = dx * dy;
+    let z2 = dz * dz;
+    let e2 = xy - 6.0 * z2;
+    let e3 = (3.0 * xy - 8.0 * z2) * dz;
+    let e4 = 3.0 * (xy - z2) * z2;
+    let e5 = xy * z2 * dz;
+    let poly = 1.0 - 3.0 * e2 / 14.0 + e3 / 6.0 + 9.0 * e2 * e2 / 88.0 - 3.0 * e4 / 22.0 - 9.0 * e2 * e3 / 52.0 + 3.0 * e5 / 26.0;
+    fac * poly / (an * an.sqrt()) + 3.0 * sum
+}
+
+/// `R_J(x, y, z, p)`, `x, y, z >= 0` with at most one 0, `p != 0` (NaN
+/// otherwise); the Cauchy principal value for `p < 0` (Carlson's
+/// formula through `R_J` at a positive `q`, `R_F` and `R_C`).
+/// Duplication and the fifth-order series; about 4 ulp for `p > 0`,
+/// with `1 + e_m` formed without cancellation so `p` far below `x, y, z`
+/// keeps full accuracy; the principal value within about 1e-14, the
+/// error of the cancelling terms of that formula. SciPy: `elliprj`.
+///
+/// ```nabi
+/// // R_J(x, y, z, z) = R_D(x, y, z).
+/// assert((special::elliprj(0.5, 1.0, 2.0, 2.0) - special::elliprd(0.5, 1.0, 2.0)).abs() < 1e-15);
+/// assert((special::elliprj(2.0, 3.0, 4.0, 5.0) - 0.14297579667156753).abs() < 4e-16);
+/// ```
+pub fn elliprj(x: f64, y: f64, z: f64, p: f64) -> f64 {
+    if !(x >= 0.0) || !(y >= 0.0) || !(z >= 0.0) || p != p || p == 0.0 { return f64::NAN; }
+    let zeros = (if x == 0.0 { 1 } else { 0 }) + (if y == 0.0 { 1 } else { 0 }) + (if z == 0.0 { 1 } else { 0 });
+    if zeros >= 2 { return f64::INFINITY; }
+    if p > 0.0 { return rj(x, y, z, p); }
+    // Order x <= y <= z, then (y - p) R_J(x, y, z, p) = (q - y) R_J(x, y,
+    // z, q) - 3 R_F(x, y, z) + 3 R_C(x z / y, p q / y) with q = y + (z -
+    // y)(y - x) / (y - p) > 0 (Carlson 1995, eq. 2.22).
+    let (a, b, c) = (x, y, z);
+    if a > b { let t = a; a = b; b = t; }
+    if b > c { let t = b; b = c; c = t; }
+    if a > b { let t = a; a = b; b = t; }
+    let q = b + (c - b) * (b - a) / (b - p);
+    let s = (q - b) * rj(a, b, c, q) - 3.0 * rf(a, b, c) + 3.0 * elliprc(a * c / b, p * q / b);
+    s / (b - p)
+}
+
+pub(pkg) fn rj(x: f64, y: f64, z: f64, p: f64) -> f64 {
+    if x == f64::INFINITY || y == f64::INFINITY || z == f64::INFINITY || p == f64::INFINITY { return 0.0; }
+    let a0 = (x + y + z + 2.0 * p) / 5.0;
+    let q = (0.25 * EPS).pow(-1.0 / 6.0) * (a0 - x).abs().max((a0 - y).abs()).max((a0 - z).abs()).max((a0 - p).abs());
+    let (xn, yn, zn, pn, an) = (x, y, z, p, a0);
+    let sum = 0.0;
+    let fac = 1.0;
+    let k = 0;
+    while q >= an.abs() && k < 100 {
+        let (sx, sy, sz, sp) = (xn.sqrt(), yn.sqrt(), zn.sqrt(), pn.sqrt());
+        let lam = sx * sy + sx * sz + sy * sz;
+        let d = (sp + sx) * (sp + sy) * (sp + sz);
+        // 1 + e_m with e_m = prod (sp - sx) / (sp + sx): the odd terms of
+        // prod (sp + sx) + prod (sp - sx) cancel exactly, leaving 2 sp (p
+        // + lam), so p far below x, y, z (e_m near -1) keeps its digits.
+        sum += fac * rc(1.0, 2.0 * sp * (pn + lam) / d) / d;
+        fac *= 0.25;
+        an = 0.25 * (an + lam);
+        xn = 0.25 * (xn + lam);
+        yn = 0.25 * (yn + lam);
+        zn = 0.25 * (zn + lam);
+        pn = 0.25 * (pn + lam);
+        q *= 0.25;
+        k += 1;
+    }
+    let dx = (an - xn) / an;
+    let dy = (an - yn) / an;
+    let dz = (an - zn) / an;
+    let dp = -(dx + dy + dz) / 2.0;
+    let p2 = dp * dp;
+    let e2 = dx * dy + dx * dz + dy * dz - 3.0 * p2;
+    let e3 = dx * dy * dz + 2.0 * e2 * dp + 4.0 * p2 * dp;
+    let e4 = (2.0 * dx * dy * dz + e2 * dp + 3.0 * p2 * dp) * dp;
+    let e5 = dx * dy * dz * p2;
+    let poly = 1.0 - 3.0 * e2 / 14.0 + e3 / 6.0 + 9.0 * e2 * e2 / 88.0 - 3.0 * e4 / 22.0 - 9.0 * e2 * e3 / 52.0 + 3.0 * e5 / 26.0;
+    fac * poly / (an * an.sqrt()) + 6.0 * sum
+}
+
+/// `R_G(x, y, z)`, `x, y, z >= 0` (NaN otherwise), from `2 R_G = z R_F -
+/// (x - z)(y - z) R_D / 3 + sqrt(x y / z)` with `z` the middle argument
+/// (DLMF 19.21.10), so `(x - z)(y - z) <= 0` and the three terms add
+/// without cancellation; with a zero argument `sqrt(z) E(1 - y / z) / 2`
+/// by the complete integral. About 4 ulp. SciPy: `elliprg`.
+///
+/// ```nabi
+/// // R_G(0, 1, 1) = pi / 4.
+/// assert((special::elliprg(0.0, 1.0, 1.0) - 0.7853981633974483).abs() < 4e-16);
+/// ```
+pub fn elliprg(x: f64, y: f64, z: f64) -> f64 {
+    if !(x >= 0.0) || !(y >= 0.0) || !(z >= 0.0) { return f64::NAN; }
+    rg(x, y, z)
+}
+
+pub(pkg) fn rg(x: f64, y: f64, z: f64) -> f64 {
+    // Sort a <= b <= c.
+    let (a, b, c) = (x, y, z);
+    if a > b { let t = a; a = b; b = t; }
+    if b > c { let t = b; b = c; c = t; }
+    if a > b { let t = a; a = b; b = t; }
+    if c == 0.0 { return 0.0; }
+    if c == f64::INFINITY { return f64::INFINITY; }
+    if b == 0.0 { return 0.5 * c.sqrt(); }
+    if a == 0.0 {
+        let p = b / c;
+        return 0.5 * c.sqrt() * e_of(1.0 - p, p);
+    }
+    0.5 * (b * rf(a, b, c) - (a - b) * (c - b) * rd(a, c, b) / 3.0 + (a * c / b).sqrt())
+}

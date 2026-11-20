@@ -1,0 +1,6 @@
+// Elliptic integrals and functions: Carlson's symmetric forms, the
+// Legendre forms built on them, and Jacobi's sn, cn, dn.
+
+pub(pkg) mod carlson;
+pub(pkg) mod jacobi;
+pub(pkg) mod legendre;

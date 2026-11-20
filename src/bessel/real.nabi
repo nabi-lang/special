@@ -1,0 +1,624 @@
+// Bessel functions of real order v and real x.
+//
+// For v >= 0: Hankel's asymptotic expansion past x = 12 when its terms
+// fall below the rounding before they start to grow. Otherwise v = n +
+// mu with |mu| <= 1/2:
+// - Y_mu and Y_mu+1 below x = 2 by Temme's series (Temme 1976), with
+//   Gamma1 and Gamma2 from the Taylor series of 1 / Gamma (DLMF 5.7.1);
+//   above it from the ratio J_mu+1 / J_mu (the continued fraction DLMF
+//   10.10.1) and (J' + iY') / (J + iY) (the continued fraction of
+//   Barnett, Feng, Steed and Goldfarb 1974) through the Wronskian;
+// - K_mu and K_mu+1 by the trapezoidal rule on DLMF 10.32.9, e^x K_nu(x)
+//   = int_0^inf e^(-x (cosh t - 1)) cosh(nu t) dt, which converges
+//   geometrically in the step (Trefethen and Weideman 2014);
+// - Y_v and K_v by forward recurrence from mu, stable for both;
+// - J_v and I_v from the ratio at v (DLMF 10.10.1, 10.33.1) and the
+//   Wronskians J_v+1 Y_v - J_v Y_v+1 = 2 / (pi x) and I_v K_v+1 + I_v+1
+//   K_v = 1 / x, or from their power series for small x.
+// Each continued fraction is summed by the forward recurrence of its
+// numerators and denominators. Negative orders come from the reflection
+// formulas; integer orders go to the integer routines.
+
+use pkg::bessel::integer::{i0, i0e, i1, i1e, jn, kn, kne, yn};
+use pkg::complex::cx;
+use pkg::gammas::{cospi, gamma, lgamma, sinpi};
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+const BIG: f64 = 1e250;
+// Below this x the leading terms of the series are exact in f64.
+const TINY: f64 = 1e-100;
+
+// Gamma2(mu) = (1/Gamma(1 - mu) + 1/Gamma(1 + mu)) / 2 = c1 + c3 mu^2 +
+// ..., Gamma1(mu) = (1/Gamma(1 - mu) - 1/Gamma(1 + mu)) / (2 mu) = -(c2 +
+// c4 mu^2 + ...), from 1 / Gamma(z) = sum c_k z^k (60-digit mpmath).
+const G1: [f64; 12] = [
+    -0.5772156649015329, 0.04200263503409524, 0.04219773455554433, -0.0072189432466631,
+    0.00021524167411495098, 2.013485478078824e-05, -1.133027231981696e-06, -6.116095104481416e-09,
+    1.18127457048702e-09, -7.782263439905071e-12, -5.100370287454476e-13, 5.348122539423018e-15,
+];
+const G2: [f64; 12] = [
+    1.0, -0.6558780715202539, 0.16653861138229148, -0.009621971527876973,
+    -0.0011651675918590652, 0.0001280502823881162, -1.2504934821426706e-06, -2.056338416977607e-07,
+    5.002007644469223e-09, 1.0434267116911005e-10, -3.696805618642206e-12, -2.0583260535665066e-14,
+];
+
+/// Whether `v` is an integer that fits `i32`.
+pub(pkg) fn integral(v: f64) -> bool { v == v.floor() && v.abs() < 2147483647.0 }
+
+/// `v = n + mu` with `n` the nearest integer, `|mu| <= 1/2`.
+fn split(v: f64) -> (i64, f64) {
+    let n = (v + 0.5).floor();
+    (n as i64, v - n)
+}
+
+fn horner<const N: usize>(c: [f64; N], u: f64) -> f64 {
+    let r = 0.0;
+    let k = N;
+    while k > 0 {
+        k -= 1;
+        r = r * u + c[k];
+    }
+    r
+}
+
+/// The ratio `F_v+1 / F_v` of the solution of `F_k+1 = (2k / x) F_k - s
+/// F_k-1` that is minimal as `k` grows: `J` for `s = 1` (DLMF 10.10.1),
+/// `I` for `s = -1` (DLMF 10.33.1). With it the sign of `J_v`: the
+/// denominators grow like `-J_v Y_v+k` once `v + k` is past `x`, where
+/// `Y` is negative. NaN if it does not settle within `2x + 1000` terms.
+pub(pkg) fn ratio(v: f64, x: f64, s: f64) -> (f64, f64) {
+    // 1 / (b1 - s / (b2 - s / (b3 - ...))), b_k = 2 (v + k) / x.
+    let (pa, a) = (1.0, 0.0);
+    let (pb, b) = (0.0, 1.0);
+    let prev = 0.0;
+    let k = 1.0;
+    let top = 2.0 * x + 1000.0;
+    while k < top {
+        let c = 2.0 * (v + k) / x;
+        let m = if k == 1.0 { 1.0 } else { -s };
+        let na = c * a + m * pa;
+        let nb = c * b + m * pb;
+        pa = a;
+        pb = b;
+        a = na;
+        b = nb;
+        if b.abs() > BIG {
+            pa /= BIG;
+            pb /= BIG;
+            a /= BIG;
+            b /= BIG;
+        }
+        let r = a / b;
+        if v + k > x && (r - prev).abs() <= 0.5 * EPS * r.abs() { return (r, if b < 0.0 { -1.0 } else { 1.0 }); }
+        prev = r;
+        k += 1.0;
+    }
+    (f64::NAN, 1.0)
+}
+
+/// `(p, q)` with `p + iq = (J'_mu + iY'_mu) / (J_mu + iY_mu)` for `x >=
+/// 2`: `-1 / (2x) + i + (i / x) a1 / (b1 + a2 / (b2 + ...))`, `a_k = (k -
+/// 1/2)^2 - mu^2`, `b_k = 2 (x + ik)`.
+fn hankel_cf(mu: f64, x: f64) -> (f64, f64) {
+    let (pa, a) = (cx(1.0, 0.0), cx(0.0, 0.0));
+    let (pb, b) = (cx(0.0, 0.0), cx(1.0, 0.0));
+    let prev = cx(0.0, 0.0);
+    let r = prev;
+    let k = 1.0;
+    while k < 100000.0 {
+        let m = (k - 0.5) * (k - 0.5) - mu * mu;
+        let c = cx(2.0 * x, 2.0 * k);
+        let na = c * a + m * pa;
+        let nb = c * b + m * pb;
+        pa = a;
+        pb = b;
+        a = na;
+        b = nb;
+        if b.re.abs().max(b.im.abs()) > BIG {
+            pa = pa / BIG;
+            pb = pb / BIG;
+            a = a / BIG;
+            b = b / BIG;
+        }
+        r = a / b;
+        let d = r - prev;
+        if d.re.hypot(d.im) <= 0.5 * EPS * r.re.hypot(r.im) { break; }
+        prev = r;
+        k += 1.0;
+    }
+    let h = cx(-0.5 / x, 1.0) + cx(0.0, 1.0 / x) * r;
+    (h.re, h.im)
+}
+
+/// `(Y_mu, Y_mu+1)` for `|mu| <= 1/2`, `0 < x < 2` by Temme's series:
+/// `Y_mu = -sum c_k g_k`, `Y_mu+1 = -(2/x) sum c_k (p_k - k g_k)` with
+/// `c_k = (-x^2/4)^k / k!`, `g_k = f_k + (2/mu) sin^2(mu pi/2) q_k` and
+/// `f_k = (k f_k-1 + p_k-1 + q_k-1) / (k^2 - mu^2)`, `p_k = p_k-1 / (k -
+/// mu)`, `q_k = q_k-1 / (k + mu)`.
+fn temme_y(mu: f64, x: f64) -> (f64, f64) {
+    let l = (2.0 / x).ln();
+    let sg = mu * l;
+    let m2 = mu * mu;
+    let g1 = horner(G1, m2);
+    let g2 = horner(G2, m2);
+    // 1 / Gamma(1 + mu) and 1 / Gamma(1 - mu).
+    let (rp, rm) = (g2 - mu * g1, g2 + mu * g1);
+    let pm = PI * mu;
+    let w = if mu == 0.0 { 1.0 } else { pm / sinpi(mu) };
+    let shc = if sg.abs() < 1e-8 { 1.0 + sg * sg / 6.0 } else { sg.sinh() / sg };
+    let f = 2.0 / PI * w * (g1 * sg.cosh() + g2 * shc * l);
+    let es = sg.exp();
+    let p = es / (PI * rp);
+    let q = 1.0 / (es * PI * rm);
+    // (2/mu) sin^2(mu pi/2) = mu pi^2/2 sinc^2(mu pi/2).
+    let hp = 0.5 * pm;
+    let sc = if hp == 0.0 { 1.0 } else { hp.sin() / hp };
+    let r = 0.5 * PI * pm * sc * sc;
+    let z = -0.25 * x * x;
+    let c = 1.0;
+    let s0 = f + r * q;
+    let s1 = p;
+    let k = 1.0;
+    while k < 500.0 {
+        f = (k * f + p + q) / (k * k - m2);
+        p /= k - mu;
+        q /= k + mu;
+        c *= z / k;
+        let g = c * (f + r * q);
+        let h = c * p - k * g;
+        s0 += g;
+        s1 += h;
+        if g.abs() <= 0.5 * EPS * s0.abs() && h.abs() <= 0.5 * EPS * s1.abs() { break; }
+        k += 1.0;
+    }
+    (-s0, -2.0 / x * s1)
+}
+
+/// `sum f(t_k)` for both orders over `t_k = k h`, `k = k0, k0 + dk, ...`,
+/// until past the peak the terms fall below 1e-18 of the sums; summed
+/// with Neumaier's compensation, the terms being near equal for small x.
+/// `e^(mu t)` carries `mu t` to double length and `e^((mu + 1) t)` is
+/// formed from it and the exact `e^t`, so a large `t` keeps its digits.
+fn trap_sum(mu: f64, x: f64, h: f64, k0: f64, dk: f64) -> (f64, f64) {
+    // Past tp, where x sinh t = 2, every term is below the last.
+    let tp = (2.0 / x).asinh();
+    let (s0, c0, s1, c1) = (0.0, 0.0, 0.0, 0.0);
+    let k = k0;
+    while k < 1e6 {
+        let t = k * h;
+        let sh = (0.5 * t).sinh();
+        let e = 0.5 * (-2.0 * x * sh * sh).exp();
+        let hi = mu * t;
+        let p = hi.exp() * (1.0 + mu.mul_add(t, -hi));
+        let q = 1.0 / p;
+        let r = t.exp();
+        let f0 = e * (p + q);
+        let f1 = e * (p * r + q / r);
+        let u = s0 + f0;
+        c0 += if s0.abs() >= f0 { (s0 - u) + f0 } else { (f0 - u) + s0 };
+        s0 = u;
+        u = s1 + f1;
+        c1 += if s1.abs() >= f1 { (s1 - u) + f1 } else { (f1 - u) + s1 };
+        s1 = u;
+        if t > tp && f0 <= 1e-18 * s0 && f1 <= 1e-18 * s1 { break; }
+        k += dk;
+    }
+    (s0 + c0, s1 + c1)
+}
+
+/// `(K_mu(x) e^x, K_mu+1(x) e^x)` for `x > 0` by the trapezoidal rule,
+/// the step halved until two sums agree to 1e-14 (the finer one is then
+/// good to the rounding). The step is a power of two, so the nodes are
+/// exact.
+fn k_pair(mu: f64, x: f64) -> (f64, f64) {
+    let h = 1.0;
+    let w = 1.0 + x.sqrt();
+    while h * w > 1.0 { h *= 0.5; }
+    let (a, b) = trap_sum(mu, x, h, 1.0, 1.0);
+    // The k = 0 term is 1 for both, at half weight.
+    let (s0, s1) = (0.5 + a, 0.5 + b);
+    let (t0, t1) = (h * s0, h * s1);
+    for _ in 0..20 {
+        let (a, b) = trap_sum(mu, x, 0.5 * h, 1.0, 2.0);
+        s0 += a;
+        s1 += b;
+        h *= 0.5;
+        let (n0, n1) = (h * s0, h * s1);
+        let d = ((n0 - t0) / n0).abs().max(((n1 - t1) / n1).abs());
+        t0 = n0;
+        t1 = n1;
+        if d <= 1e-14 { break; }
+    }
+    (t0, t1)
+}
+
+/// `(F_v, F_v+1, e)` from `(F_mu, F_mu+1)` by `F_k+1 = (2k / x) F_k + s
+/// F_k-1` (Y for `s = -1`, K for `s = 1`), the true values being `F BIG^e`
+/// so an overflow on the way is no loss.
+fn up(mu: f64, n: i64, x: f64, f0: f64, f1: f64, s: f64) -> (f64, f64, i64) {
+    let e = 0;
+    let i = 1;
+    while i <= n {
+        let t = 2.0 * (mu + i as f64) / x * f1 + s * f0;
+        f0 = f1;
+        f1 = t;
+        if f1.abs() > BIG {
+            f0 /= BIG;
+            f1 /= BIG;
+            e += 1;
+        }
+        i += 1;
+    }
+    (f0, f1, e)
+}
+
+/// `f BIG^e`, overflowing to infinity.
+fn unscale(f: f64, e: i64) -> f64 {
+    for _ in 0..e { f *= BIG; }
+    f
+}
+
+/// `f / BIG^e`, underflowing to zero.
+fn descale(f: f64, e: i64) -> f64 {
+    for _ in 0..e { f /= BIG; }
+    f
+}
+
+/// `(J_mu, Y_mu, Y_mu+1)` for `|mu| <= 1/2`, `x > 0`; J_mu is NaN below
+/// 2, where the power series serves.
+fn y_pair(mu: f64, x: f64) -> (f64, f64, f64) {
+    if x < 2.0 {
+        let (y0, y1) = temme_y(mu, x);
+        return (f64::NAN, y0, y1);
+    }
+    let (rho, sg) = ratio(mu, x, 1.0);
+    // (J_mu, J_mu+1) up to a positive factor, the larger one of size 1.
+    let (a, b) = if rho.abs() <= 1.0 { (sg, sg * rho) } else { (sg / rho.abs(), sg * rho.signum()) };
+    let (p, q) = hankel_cf(mu, x);
+    // J' = mu / x J - J_mu+1, and J' + iY' = (p + iq) (J + iY) gives Y =
+    // (p J - J') / q; the Wronskian q (J^2 + Y^2) = 2 / (pi x) fixes the
+    // factor without dividing by J, which is small near its zeros.
+    let da = mu / x * a - b;
+    let g = (p * a - da) / q;
+    let c = (2.0 / (PI * x * q)).sqrt() / a.hypot(g);
+    let (j, y) = (c * a, c * g);
+    let dy = p * y + q * j;
+    (j, y, mu / x * y - dy)
+}
+
+/// Hankel's expansion `sum a_k(v) / x^k` split into its even (P) and
+/// odd (Q) parts with their alternating signs; `none` when the terms
+/// grow before they fall below the rounding.
+pub(pkg) fn hankel_pq(v: f64, x: f64) -> (f64, f64) | none {
+    let mu = 4.0 * v * v;
+    let (p, q) = (1.0, 0.0);
+    let term = 1.0;
+    let prev = f64::INFINITY;
+    let k = 1.0;
+    while k < 300.0 {
+        let o = 2.0 * k - 1.0;
+        term *= (mu - o * o) / (8.0 * k * x);
+        let m = (k as i64) % 4;
+        if m == 1 { q += term; } else if m == 2 { p -= term; } else if m == 3 { q -= term; } else { p += term; }
+        let a = term.abs();
+        if a <= 0.25 * EPS * (p.abs() + q.abs()) { return (p, q); }
+        if a > prev { return none; }
+        prev = a;
+        k += 1.0;
+    }
+    none
+}
+
+/// The same expansion with all signs positive, `sum a_k(v) / x^k`, and
+/// alternating, `sum (-1)^k a_k(v) / x^k`: K's and I's.
+fn hankel_ik(v: f64, x: f64) -> (f64, f64) | none {
+    let mu = 4.0 * v * v;
+    let (sk, si) = (1.0, 1.0);
+    let term = 1.0;
+    let prev = f64::INFINITY;
+    let k = 1.0;
+    while k < 300.0 {
+        let o = 2.0 * k - 1.0;
+        term *= (mu - o * o) / (8.0 * k * x);
+        sk += term;
+        if (k as i64) % 2 == 1 { si -= term; } else { si += term; }
+        let a = term.abs();
+        if a <= 0.25 * EPS * si.abs().min(sk.abs()) { return (si, sk); }
+        if a > prev { return none; }
+        prev = a;
+        k += 1.0;
+    }
+    none
+}
+
+/// `(J_v(x), Y_v(x))` for `v >= 0`, `x > 0` outside Hankel's range.
+fn jy_rec(v: f64, x: f64) -> (f64, f64) {
+    let (n, mu) = split(v);
+    let (j0, y0, y1) = y_pair(mu, x);
+    let (yv, yv1, e) = up(mu, n, x, y0, y1, -1.0);
+    // J's series loses at most a factor e to cancellation here.
+    let j = if x < 2.0 || 0.125 * x * x < v + 1.0 {
+        series(v, x, -1.0)
+    } else if n == 0 {
+        j0
+    } else {
+        let (rho, _) = ratio(v, x, 1.0);
+        descale(2.0 / (PI * x * (rho * yv - yv1)), e)
+    };
+    (j, unscale(yv, e))
+}
+
+/// `(I_v(x) e^-x, K_v(x) e^x)` for `v >= 0`, `x > 0` outside Hankel's
+/// range.
+fn ik_rec(v: f64, x: f64) -> (f64, f64) {
+    let (n, mu) = split(v);
+    let (k0, k1) = k_pair(mu, x);
+    let (kv, kv1, e) = up(mu, n, x, k0, k1, 1.0);
+    let i = if x < 2.0 || 0.25 * x * x < 25.0 * (v + 1.0) {
+        series(v, x, 1.0) * (-x).exp()
+    } else {
+        let (rho, _) = ratio(v, x, -1.0);
+        descale(1.0 / (x * (kv1 + rho * kv)), e)
+    };
+    (i, unscale(kv, e))
+}
+
+/// `(x/2)^v / Gamma(1 + v) * sum_k (s x^2/4)^k / (k! (1 + v)_k)`: J's
+/// series for `s = -1`, I's for `s = 1`. I's terms are all positive;
+/// J's lose little while `x^2 / 4` is below about `v + 1`.
+pub(pkg) fn series(v: f64, x: f64, s: f64) -> f64 {
+    let z = 0.5 * x;
+    let pre = if v < 170.0 { z.pow(v) / gamma(1.0 + v) } else { (v * z.ln() - lgamma(1.0 + v)).exp() };
+    if pre == 0.0 { return 0.0; }
+    let q = s * z * z;
+    let (t, sum) = (1.0, 1.0);
+    let k = 1.0;
+    while k < 500.0 {
+        t *= q / (k * (v + k));
+        sum += t;
+        if t.abs() <= 0.25 * EPS * sum.abs() { break; }
+        k += 1.0;
+    }
+    pre * sum
+}
+
+/// `((x/2)^v / Gamma(1 + v), (x/2)^-v / Gamma(1 - v))`, the leading
+/// terms of J_v and J_-v (I_v and I_-v).
+fn lead(v: f64, x: f64) -> (f64, f64) {
+    let z = 0.5 * x;
+    let p = if v < 170.0 { z.pow(v) / gamma(1.0 + v) } else { (v * z.ln() - lgamma(1.0 + v)).exp() };
+    (p, z.pow(-v) / gamma(1.0 - v))
+}
+
+/// J and Y from Hankel's `(P, Q)`, with `cos(x - (v/2 + 1/4) pi)` formed
+/// from `cos x` and `sin x` so a large `x` needs no reduction by pi.
+fn hankel_jy(v: f64, x: f64, r: (f64, f64)) -> (f64, f64) { hankel_jy_at(v, x, r, x.cos(), x.sin()) }
+
+/// `hankel_jy` with `cos x` and `sin x` given, for an `x` known to more
+/// than double precision.
+pub(pkg) fn hankel_jy_at(v: f64, x: f64, r: (f64, f64), cx: f64, sx: f64) -> (f64, f64) {
+    let (p, q) = r;
+    let (cf, sf) = (cospi(0.5 * v + 0.25), sinpi(0.5 * v + 0.25));
+    let cc = cx * cf + sx * sf;
+    let sc = sx * cf - cx * sf;
+    let m = (2.0 / (PI * x)).sqrt();
+    (m * (p * cc - q * sc), m * (p * sc + q * cc))
+}
+
+/// `(J_v(x), Y_v(x))` for `v >= 0` not an integer, `x > 0` finite.
+pub(pkg) fn jy(v: f64, x: f64) -> (f64, f64) {
+    if x < TINY {
+        // J_v = (x/2)^v / Gamma(1 + v); Y_v by the reflection formula.
+        let (jp, jm) = lead(v, x);
+        return (jp, (jp * cospi(v) - jm) / sinpi(v));
+    }
+    if x > 12.0 {
+        let r = hankel_pq(v, x);
+        if r is (f64, f64) { return hankel_jy(v, x, r); }
+        if v < x {
+            // Up from the fractional order, where the expansion holds;
+            // the recurrence is stable for J and Y while the order is
+            // below x.
+            let m = v.floor();
+            let mu = v - m;
+            let a = hankel_pq(mu, x);
+            let b = hankel_pq(mu + 1.0, x);
+            if a is (f64, f64) && b is (f64, f64) {
+                let (ja, ya) = hankel_jy(mu, x, a);
+                let (jb, yb) = hankel_jy(mu + 1.0, x, b);
+                let k = 1.0;
+                while k < m {
+                    let t = 2.0 * (mu + k) / x;
+                    let (jc, yc) = (t * jb - ja, t * yb - ya);
+                    ja = jb;
+                    ya = yb;
+                    jb = jc;
+                    yb = yc;
+                    k += 1.0;
+                }
+                return (jb, yb);
+            }
+        }
+    }
+    jy_rec(v, x)
+}
+
+/// `(I_v(x) e^-x, K_v(x) e^x)` for `v >= 0`, `x > 0` finite.
+pub(pkg) fn ik(v: f64, x: f64) -> (f64, f64) {
+    if x < TINY && !integral(v) {
+        let (ip, im) = lead(v, x);
+        return (ip, 0.5 * PI * (im - ip) / sinpi(v));
+    }
+    if x > 12.0 {
+        let r = hankel_ik(v, x);
+        if r is (f64, f64) {
+            let (si, sk) = r;
+            return (si / (2.0 * PI * x).sqrt(), sk * (PI / (2.0 * x)).sqrt());
+        }
+    }
+    ik_rec(v, x)
+}
+
+/// `e^x` without overflowing before the product does: `m e^x`.
+fn times_exp(m: f64, x: f64) -> f64 {
+    let h = (0.5 * x).exp();
+    m * h * h
+}
+
+/// The value of `J_v` or `I_v` at 0: 1 for `v = 0`, 0 for `v > 0`,
+/// signed infinity for negative non-integer `v`.
+fn at_zero(v: f64) -> f64 {
+    if v == 0.0 { return 1.0; }
+    if v > 0.0 || integral(v) { return 0.0; }
+    if gamma(1.0 + v) > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }
+}
+
+/// The Bessel function of the first kind `J_v(x)` of real order `v`.
+/// Integer `v` goes to `jn`; otherwise `x < 0` is NaN. About 1e-15
+/// relative off the zeros for `v` up to a few hundred (5e-15 in the
+/// tests), absolute 1e-16 near them; negative `v` by `J_-v = cos(v pi)
+/// J_v - sin(v pi) Y_v`. Complex `x` is not covered. SciPy: `jv`.
+///
+/// ```nabi
+/// assert((special::jv(0.5, 1.0) - 0.6713967071418031).abs() < 3e-16);
+/// assert(special::jv(2.0, 1.5) == special::jn(2, 1.5));
+/// ```
+pub fn jv(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    if integral(v) { return jn(v as i32, x); }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return at_zero(v); }
+    if x == f64::INFINITY { return 0.0; }
+    if v > 0.0 { return jy(v, x).0; }
+    let (j, y) = jy(-v, x);
+    cospi(-v) * j - sinpi(-v) * y
+}
+
+/// The Bessel function of the second kind `Y_v(x)` of real order, `x >
+/// 0` (NaN below, `-inf` at 0 for `v >= 0`). Integer `v` goes to `yn`.
+/// Accuracy as `jv`. SciPy: `yv`.
+///
+/// ```nabi
+/// assert((special::yv(0.5, 1.0) + 0.43109886801837607).abs() < 3e-16);
+/// ```
+pub fn yv(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    if integral(v) { return yn(v as i32, x); }
+    if x < 0.0 { return f64::NAN; }
+    if x == f64::INFINITY { return 0.0; }
+    if x == 0.0 {
+        if v > 0.0 { return f64::NEG_INFINITY; }
+        let c = cospi(-v);
+        return if c == 0.0 { 0.0 } else if c > 0.0 { f64::NEG_INFINITY } else { f64::INFINITY };
+    }
+    if v > 0.0 { return jy(v, x).1; }
+    let (j, y) = jy(-v, x);
+    sinpi(-v) * j + cospi(-v) * y
+}
+
+/// `jv` scaled by `e^-|Im x|`, which for real `x` is `jv` itself (the
+/// name for code ported from SciPy's `jve`).
+///
+/// ```nabi
+/// assert(special::jve(1.5, 2.0) == special::jv(1.5, 2.0));
+/// ```
+pub fn jve(v: f64, x: f64) -> f64 { jv(v, x) }
+
+/// `yv` scaled by `e^-|Im x|`: `yv` itself for real `x`. SciPy: `yve`.
+///
+/// ```nabi
+/// assert(special::yve(1.5, 2.0) == special::yv(1.5, 2.0));
+/// ```
+pub fn yve(v: f64, x: f64) -> f64 { yv(v, x) }
+
+/// `I_v(x) e^-|x|` for `v >= 0` and, by reflection, `v < 0`.
+fn ive_pos(v: f64, x: f64) -> f64 {
+    if v >= 0.0 { return ik(v, x).0; }
+    let (ie, ke) = ik(-v, x);
+    ie + 2.0 / PI * sinpi(-v) * ke * (-2.0 * x).exp()
+}
+
+/// The modified Bessel function of the first kind `I_v(x)` of real
+/// order. Integer `v` takes `x < 0` (`I_n(-x) = (-1)^n I_n(x)`); other
+/// `v` give NaN there. `inf` once the value overflows. About 1e-15
+/// relative (4e-15 in the tests); `I_-v = I_v + (2 / pi) sin(v pi)
+/// K_v`. SciPy: `iv`.
+///
+/// ```nabi
+/// assert((special::iv(0.5, 1.0) - 0.9376748882454876).abs() < 5e-16);
+/// assert(special::iv(0.0, 2.0) == special::i0(2.0));
+/// ```
+pub fn iv(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    if x < 0.0 {
+        if !integral(v) { return f64::NAN; }
+        let r = iv(v, -x);
+        return if (v as i64) % 2 == 0 { r } else { -r };
+    }
+    if x == 0.0 { return at_zero(v); }
+    if v == 0.0 { return i0(x); }
+    if v.abs() == 1.0 { return i1(x); }
+    if x == f64::INFINITY { return x; }
+    if v < 0.0 && !integral(v) {
+        let (ie, ke) = ik(-v, x);
+        return times_exp(ie, x) + 2.0 / PI * sinpi(-v) * ke * (-x).exp();
+    }
+    let a = v.abs();
+    if x < 2.0 || 0.25 * x * x < 25.0 * (a + 1.0) { return series(a, x, 1.0); }
+    times_exp(ik(a, x).0, x)
+}
+
+/// `I_v(x) e^-|x|`, the exponentially scaled `iv`, finite where `iv`
+/// overflows. SciPy: `ive`.
+///
+/// ```nabi
+/// assert((special::ive(0.5, 1000.0) - 0.0126156626101008).abs() < 1e-17);
+/// ```
+pub fn ive(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    if x < 0.0 {
+        if !integral(v) { return f64::NAN; }
+        let r = ive(v, -x);
+        return if (v as i64) % 2 == 0 { r } else { -r };
+    }
+    if x == 0.0 { return at_zero(v); }
+    if v == 0.0 { return i0e(x); }
+    if v.abs() == 1.0 { return i1e(x); }
+    if x == f64::INFINITY { return 0.0; }
+    if integral(v) { return ik(v.abs(), x).0; }
+    ive_pos(v, x)
+}
+
+/// The modified Bessel function of the second kind `K_v(x)` of real
+/// order, `x > 0` (NaN below, `inf` at 0); `K_-v = K_v`. Integer `v`
+/// goes to `kn`. About 1e-15 relative (3e-15 in the tests). SciPy:
+/// `kv`.
+///
+/// ```nabi
+/// assert((special::kv(0.5, 1.0) - 0.4610685044478946).abs() < 3e-16);
+/// ```
+pub fn kv(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    let a = v.abs();
+    if integral(a) { return kn(a as i32, x); }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::INFINITY; }
+    if x == f64::INFINITY { return 0.0; }
+    ik(a, x).1 * (-x).exp()
+}
+
+/// `K_v(x) e^x`, the exponentially scaled `kv`. SciPy: `kve`.
+///
+/// ```nabi
+/// assert((special::kve(0.5, 4.0) - (3.141592653589793 / 8.0).sqrt()).abs() < 3e-16);
+/// ```
+pub fn kve(v: f64, x: f64) -> f64 {
+    if v != v || x != x { return f64::NAN; }
+    let a = v.abs();
+    if integral(a) { return kne(a as i32, x); }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::INFINITY; }
+    if x == f64::INFINITY { return 0.0; }
+    ik(a, x).1
+}

@@ -1,0 +1,84 @@
+// The Faddeeva function and the error functions at 1000 points per
+// call; ns/item is one value.
+
+use core::bench::Bench;
+use core::hint::black_box;
+use core::num::Complex;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 1000;
+
+/// `N` uniform points in [lo, hi) from a fixed seed.
+fn points(lo: f64, hi: f64) -> List<f64> {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.uniform(lo, hi)); }
+    xs
+}
+
+#[bench]
+fn wofz_near(b: Bench) {
+    let x = points(-6.0, 6.0);
+    let y = points(0.0, 6.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::wofz(Complex::new(x[i], y[i] * 0.3));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn wofz_far(b: Bench) {
+    let x = points(-30.0, 30.0);
+    let y = points(0.0, 30.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::wofz(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn cerf(b: Bench) {
+    let x = points(-4.0, 4.0);
+    let y = points(0.0, 4.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::cerf(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn erfcx(b: Bench) {
+    let x = points(-5.0, 30.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::erfcx(v); }
+        s
+    });
+}
+
+#[bench]
+fn dawson(b: Bench) {
+    let x = points(0.0, 20.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for v in black_box(x) { s += pkg::dawson(v); }
+        s
+    });
+}

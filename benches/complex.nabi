@@ -1,0 +1,77 @@
+// The complex gamma family at 1000 points per call; ns/item is one
+// value.
+
+use core::bench::Bench;
+use core::hint::black_box;
+use core::num::Complex;
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+const N: usize = 1000;
+
+/// `N` uniform points in [lo, hi) from a fixed seed.
+fn points(lo: f64, hi: f64) -> List<f64> {
+    let g = Xoshiro256PlusPlus::seed(3);
+    let xs: List<f64> = List::with_capacity(N);
+    for _ in 0..N { xs.push(g.uniform(lo, hi)); }
+    xs
+}
+
+#[bench]
+fn clgamma(b: Bench) {
+    let x = points(-10.0, 10.0);
+    let y = points(0.0, 10.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::clgamma(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn cgamma(b: Bench) {
+    let x = points(-10.0, 10.0);
+    let y = points(0.0, 10.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::cgamma(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn cdigamma(b: Bench) {
+    let x = points(-10.0, 10.0);
+    let y = points(0.0, 10.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::cdigamma(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}
+
+#[bench]
+fn czeta(b: Bench) {
+    let x = points(0.5, 20.0);
+    let y = points(0.0, 20.0);
+    b.set_items(N as i64);
+    b.iter(|| {
+        let s = 0.0;
+        for i in 0..N {
+            let r = pkg::czeta(Complex::new(x[i], y[i]));
+            s += r.re + r.im;
+        }
+        s
+    });
+}

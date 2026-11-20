@@ -1,0 +1,83 @@
+// The logistic family: closed forms, the limits at both ends, and
+// mpmath (log(1 + exp(x)), 1 / (1 + exp(-x)) at 40 digits).
+
+use pkg::tests::suite::{close, expect, rel};
+use core::array::{Array, Matrix, Vector};
+
+const LOG1PEXP: [[f64; 2]; 8] = [
+    [-700.0, 9.85967654375977e-305],
+    [-40.0, 4.248354255291589e-18],
+    [-10.0, 4.539889921686465e-05],
+    [-1e-10, 0.6931471805099453],
+    [0.0, 0.6931471805599453],
+    [5.0, 5.006715348489118],
+    [25.0, 25.000000000013888],
+    [40.0, 40.0],
+];
+const EXPIT: [[f64; 2]; 6] = [
+    [-700.0, 9.85967654375977e-305],
+    [-20.0, 2.0611536181902037e-09],
+    [-1.0, 0.2689414213699951],
+    [0.5, 0.6224593312018546],
+    [10.0, 0.9999546021312976],
+    [40.0, 1.0],
+];
+
+#[test]
+fn scalars() {
+    for r in LOG1PEXP { rel(pkg::log1pexp(r[0]), r[1], 2.3e-16, f"log1pexp({r[0]})"); }
+    for r in EXPIT { rel(pkg::expit(r[0]), r[1], 2.3e-16, f"expit({r[0]})"); }
+    for x in [-30.0, -3.0, -0.25, 0.0, 1e-9, 2.0, 30.0] {
+        // logit(expit(x)) = x where expit keeps the digits of x.
+        if x < 20.0 { close(pkg::logit(pkg::expit(x)), x, 4e-15 * x.abs().max(1.0), f"logit(expit({x}))"); }
+        close(pkg::log_expit(x), -pkg::log1pexp(-x), 0.0, "log_expit");
+        rel(pkg::expit(x) + pkg::expit(-x), 1.0, 2.3e-16, f"expit symmetry at {x}");
+    }
+    expect(pkg::logit(0.0) == f64::NEG_INFINITY && pkg::logit(1.0) == f64::INFINITY && pkg::logit(1.5) != pkg::logit(1.5), "logit ends");
+    rel(pkg::logit(1e-300), -690.7755278982137, 2.3e-16, "logit of a tiny p");
+    expect(pkg::expit(f64::NAN) != pkg::expit(f64::NAN) && pkg::log1pexp(f64::INFINITY) == f64::INFINITY, "NaN, inf");
+    rel(pkg::log1mexp(1e-20), -46.051701859880914, 2.3e-16, "log1mexp small");
+    rel(pkg::log1mexp(2.0), -0.14541345786885906, 2.3e-16, "log1mexp mid");
+    expect(pkg::log1mexp(0.0) == f64::NEG_INFINITY && pkg::log1mexp(-1.0) != pkg::log1mexp(-1.0), "log1mexp ends");
+    expect(pkg::logaddexp(f64::NEG_INFINITY, f64::NEG_INFINITY) == f64::NEG_INFINITY, "logaddexp of -inf");
+    rel(pkg::logaddexp(-1000.0, 0.0), 0.0 + (-1000.0).exp(), 2.3e-16, "logaddexp lopsided");
+}
+
+#[test]
+fn arrays() {
+    let x: Vector<f64> = [1, 2, 3];
+    rel(pkg::logsumexp(x), 3.40760596444438, 2.3e-16, "logsumexp");
+    let e: Array<f64, 1> = Array::zeros([0]);
+    expect(pkg::logsumexp(e) == f64::NEG_INFINITY, "empty");
+    let n: Vector<f64> = [1, f64::NAN];
+    expect(pkg::logsumexp(n) != pkg::logsumexp(n), "NaN");
+    let big: Vector<f64> = [-1e308, 1e308];
+    expect(pkg::logsumexp(big) == 1e308, "no overflow");
+    let m: Matrix<f64> = [[1, 2, 3], [4, 5, 6]];
+    let r0 = try! pkg::logsumexp_axis(m, 0);
+    let r1 = try! pkg::logsumexp_axis(m, 1);
+    expect(r0.shape() == [3] && r1.shape() == [2], "axis shapes");
+    rel(r1[0], 3.40760596444438, 2.3e-16, "row 0");
+    rel(r0[2], 6.048587351573742, 2.3e-16, "column 2");
+    let s = try! pkg::softmax(m);
+    let t = try! pkg::softmax(m, 0);
+    for i in 0..2 { close(s[i, 0] + s[i, 1] + s[i, 2], 1.0, 4.5e-16, "rows sum to 1"); }
+    for j in 0..3 { close(t[0, j] + t[1, j], 1.0, 4.5e-16, "columns sum to 1"); }
+    rel(t[0, 0], pkg::expit(-3.0), 2.3e-16, "two-way softmax is the sigmoid");
+    let ls = try! pkg::log_softmax(m);
+    for i in 0..2 {
+        for j in 0..3 { close(ls[i, j].exp(), s[i, j], 2.3e-16, "log_softmax"); }
+    }
+    let threw = try { _ = try pkg::softmax(m, 2); false } catch _: pkg::SpecialError { true };
+    expect(threw, "axis past the rank");
+    // A rank-3 array along its middle axis.
+    let c: Array<f64, 3> = Array::from_fn([2, 3, 2], |i: [usize; 3]| -> f64 { (i[0] * 6 + i[1] * 2 + i[2]) as f64 });
+    let q = try! pkg::softmax(c, 1);
+    for a in 0..2 {
+        for b in 0..2 { close(q[a, 0, b] + q[a, 1, b] + q[a, 2, b], 1.0, 4.5e-16, "rank 3"); }
+    }
+    let z = try! pkg::logsumexp_axis(c, 2);
+    rel(z[1, 2], 11.0 + pkg::log1pexp(-1.0), 2.3e-16, "rank 3 lse");
+    expect((try! pkg::logsumexp_axis(c)).to_list() == z.to_list(), "last axis by default");
+    expect((try! pkg::softmax(c)).to_list() == (try! pkg::softmax(c, 2)).to_list(), "softmax last axis");
+}

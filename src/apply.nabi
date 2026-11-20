@@ -1,0 +1,27 @@
+// Element-wise evaluation over large arrays on all cores. `f.(x)`
+// already maps any function of this package over an array; `apply`
+// does the same split across core::par's workers once the array is
+// large enough to pay for the hand-off.
+
+use core::array::Array;
+use core::par;
+
+// Below this many elements one thread is faster (a special function
+// costs 10 to 500 ns; a parallel map about 20 us to start).
+const PAR: usize = 16384;
+
+/// `f` of every element of `a`, in parallel above 16384 elements; the
+/// same values as `f.(a)` (each element is computed alone, so the
+/// split does not change a result).
+///
+/// ```nabi
+/// use core::array::{Array, Vector};
+///
+/// let x: Vector<f64> = Array::from_fn([100000], |i: [usize; 1]| -> f64 { 0.001 * i[0] as f64 });
+/// let y = special::apply(special::erf, x);
+/// assert(y[2000] == special::erf(2.0) && y == special::erf.(x));
+/// ```
+pub fn apply<const N: usize>(f: fn(f64) -> f64 + Send + Sync, a: Array<f64, N>) -> Array<f64, N> {
+    if a.len() < PAR { return a.map(f); }
+    Array::from_list(par::map(a.to_list(), f), a.shape())
+}

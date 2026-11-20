@@ -1,0 +1,390 @@
+// Gauss quadrature rules: n nodes x_i (the roots of the degree-n
+// orthogonal polynomial) and weights w_i with sum w_i f(x_i) =
+// integral w(x) f(x) dx exactly for polynomials f of degree <= 2n - 1.
+//
+// Golub and Welsch (1969): the nodes are the eigenvalues of the
+// symmetric tridiagonal Jacobi matrix of the recurrence, found here by
+// the implicit QL method with Wilkinson shifts, O(n^2). For Legendre
+// polynomials the start is Tricomi's asymptotic formula instead, with
+// no eigenproblem. Each node is then polished by Newton's method on the
+// recurrence and each weight comes from the Christoffel numbers, w_i =
+// mu0 / sum_k q_k(x_i)^2 with q_k orthonormal, so nodes and weights are
+// within a few ulp of the exact ones whatever the eigensolver left.
+// Chebyshev rules have closed forms.
+
+use pkg::SpecialError;
+use pkg::error::arg;
+use pkg::gammas::lgamma;
+use core::array::Vector;
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+const BIG: f64 = 1.157920892373162e77;
+const SMALL: f64 = 8.636168555094445e-78;
+
+/// The eigenvalues of the symmetric tridiagonal matrix with diagonal `d`
+/// and off-diagonal `e` (`e[i]` couples `i` and `i + 1`), by implicit QL.
+fn tql(what: str, d: List<f64>, e: List<f64>) throws (SpecialError) {
+    let n = d.len();
+    for l in 0..n {
+        let iter = 0usize;
+        loop {
+            let m = l;
+            while m + 1 < n {
+                let dd = d[m].abs() + d[m + 1].abs();
+                if e[m].abs() <= EPS * dd { break; }
+                m += 1;
+            }
+            if m == l { break; }
+            iter += 1;
+            if iter > 60 { throw SpecialError::NoConvergence { what: f"{what}: the tridiagonal eigenproblem", iterations: 60 }; }
+            let g = (d[l + 1] - d[l]) / (2.0 * e[l]);
+            let r = g.hypot(1.0);
+            g = d[m] - d[l] + e[l] / (g + if g >= 0.0 { r } else { -r });
+            let (s, c, p) = (1.0, 1.0, 0.0);
+            let i = m;
+            let split = false;
+            while i > l {
+                i -= 1;
+                let f = s * e[i];
+                let b = c * e[i];
+                r = f.hypot(g);
+                e[i + 1] = r;
+                if r == 0.0 {
+                    d[i + 1] -= p;
+                    e[m] = 0.0;
+                    split = true;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = d[i + 1] - p;
+                r = (d[i] - g) * s + 2.0 * c * b;
+                p = s * r;
+                d[i + 1] = g + p;
+                g = c * r - b;
+            }
+            if split { continue; }
+            d[l] -= p;
+            e[l] = g;
+            e[m] = 0.0;
+        }
+    }
+}
+
+/// The recurrence of the orthonormal polynomials q_k (q_0 = 1, `b[k]`
+/// the k-th off-diagonal, `b[0]` unused) at `x`: `(p_n(x) / p_n'(x),
+/// ln S, S' / S)` with `S = sum_(k < n) q_k(x)^2`, `p_n` the last step
+/// left unnormalized. Rescaled by 2^256 as it goes so nothing overflows.
+fn step(a: List<f64>, b: List<f64>, x: f64) -> (f64, f64, f64) {
+    let n = a.len();
+    let (q0, q1) = (0.0, 1.0);
+    let (d0, d1) = (0.0, 0.0);
+    let s = 1.0;
+    let ds = 0.0;
+    let lscale = 0.0;
+    for k in 0..n {
+        let bk = if k == 0 { 0.0 } else { b[k] };
+        let bn = if k + 1 < n { b[k + 1] } else { 1.0 };
+        let q2 = ((x - a[k]) * q1 - bk * q0) / bn;
+        let d2 = (q1 + (x - a[k]) * d1 - bk * d0) / bn;
+        q0 = q1;
+        q1 = q2;
+        d0 = d1;
+        d1 = d2;
+        if k + 1 < n {
+            s += q1 * q1;
+            ds += 2.0 * q1 * d1;
+        }
+        if q1.abs() > BIG || d1.abs() > BIG {
+            q0 *= SMALL;
+            q1 *= SMALL;
+            d0 *= SMALL;
+            d1 *= SMALL;
+            s *= SMALL * SMALL;
+            ds *= SMALL * SMALL;
+            lscale += 354.89135644669097;
+        }
+    }
+    (q1 / d1, s.ln() + lscale, ds / s)
+}
+
+/// Nodes from their starting values `x` (rising): Newton on the
+/// recurrence, then the Christoffel weights; `sym` makes the rule
+/// exactly symmetric about 0.
+fn polish(a: List<f64>, b: List<f64>, x: List<f64>, lmu0: f64, sym: bool) -> (Vector<f64>, Vector<f64>) {
+    let n = x.len();
+    let w: List<f64> = List::with_capacity(n);
+    // A symmetric rule needs only its lower half.
+    let half = if sym { (n + 1) / 2 } else { n };
+    for i in 0..half {
+        let xi = x[i];
+        let (dx, ls, dl) = step(a, b, xi);
+        for _ in 0..10 {
+            if !dx.is_finite() { break; }
+            xi -= dx;
+            let (ndx, nls, ndl) = step(a, b, xi);
+            let done = ndx.abs() <= EPS * xi.abs() || dx.abs() <= EPS * xi.abs() || ndx == 0.0;
+            dx = ndx;
+            ls = nls;
+            dl = ndl;
+            if done { break; }
+        }
+        x[i] = xi;
+        // The weight at the exact root xi - dx, not at its rounding: the
+        // Christoffel function's slope makes the difference 1e-14 near the
+        // ends otherwise.
+        let corr = if dx.is_finite() { -dx * dl } else { 0.0 };
+        w.push((lmu0 - ls - corr.ln_1p()).exp());
+    }
+    if sym {
+        if n % 2 == 1 { x[n / 2] = 0.0; }
+        for i in half..n {
+            x[i] = -x[n - 1 - i];
+            w.push(w[n - 1 - i]);
+        }
+    }
+    (Vector::<f64>::from(x), Vector::<f64>::from(w))
+}
+
+/// The rule of the recurrence with diagonal `a`, squared off-diagonal
+/// `b2` (`b2[0]` unused) and `ln mu0`, the log of the weight's integral.
+fn golub_welsch(what: str, a: List<f64>, b2: List<f64>, lmu0: f64, sym: bool) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    let n = a.len();
+    let b: List<f64> = List::with_capacity(n);
+    for k in 0..n { b.push(b2[k].sqrt()); }
+    let d = a.clone();
+    let e: List<f64> = List::with_capacity(n);
+    for k in 1..n { e.push(b[k]); }
+    e.push(0.0);
+    try tql(what, d, e);
+    let x = d.sorted_by(|p, q| p.total_cmp(q));
+    polish(a, b, x, lmu0, sym)
+}
+
+fn need_n(what: str, n: usize) throws (SpecialError) {
+    try arg(n >= 1, f"{what}: n = 0 gives no nodes; pass n >= 1");
+}
+
+/// The Gauss-Legendre rule on [-1, 1] (weight 1): `(nodes, weights)`,
+/// nodes rising. No eigenproblem: starts from Tricomi's asymptotic
+/// nodes, `x_k = (1 - 1/(8 n^2) + 1/(8 n^3)) cos((4k - 1) pi / (4n +
+/// 2))`, then Newton and the Christoffel weights: O(n^2). Nodes within 4
+/// ulp, weights within 1e-14 relative (about 30 ulp at the ends of a
+/// large rule), exactly symmetric.
+/// Throws `InvalidArgument` for `n = 0`. SciPy: `roots_legendre`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_legendre(3);
+/// assert((x[2] - 0.6f64.sqrt()).abs() < 4e-16 && x[1] == 0.0);
+/// assert((w[0] - 5.0 / 9.0).abs() < 4e-16 && (w[1] - 8.0 / 9.0).abs() < 4e-16);
+/// ```
+pub fn roots_legendre(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_legendre", n);
+    let a: List<f64> = List::with_capacity(n);
+    let b: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        a.push(0.0);
+        let kf = k as f64;
+        b.push(if k == 0 { 0.0 } else { kf / (4.0 * kf * kf - 1.0).sqrt() });
+    }
+    let nf = n as f64;
+    let x: List<f64> = List::with_capacity(n);
+    let f = 1.0 - 1.0 / (8.0 * nf * nf) + 1.0 / (8.0 * nf * nf * nf);
+    for i in 0..n {
+        // Rising: k = n - i.
+        let k = (n - i) as f64;
+        x.push(f * ((4.0 * k - 1.0) * PI / (4.0 * nf + 2.0)).cos());
+    }
+    polish(a, b, x, 2f64.ln(), true)
+}
+
+/// The Gauss-Chebyshev rule of the first kind (weight `1 / sqrt(1 -
+/// x^2)` on (-1, 1)): nodes `cos((2k - 1) pi / (2n))`, weights `pi / n`,
+/// closed form. Throws for `n = 0`. SciPy: `roots_chebyt`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_chebyt(2);
+/// assert((x[1] - 0.5f64.sqrt()).abs() < 4e-16 && w[0] == 3.141592653589793 / 2.0);
+/// ```
+pub fn roots_chebyt(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_chebyt", n);
+    let x: List<f64> = List::with_capacity(n);
+    let w: List<f64> = List::with_capacity(n);
+    let nf = n as f64;
+    for i in 0..n {
+        // sin form: cos((2k - 1) pi / 2n) = sin((n + 1 - 2k) pi / 2n), exact
+        // zero and symmetric.
+        let k = (n - i) as f64;
+        x.push(((nf + 1.0 - 2.0 * k) * PI / (2.0 * nf)).sin());
+        w.push(PI / nf);
+    }
+    (Vector::<f64>::from(x), Vector::<f64>::from(w))
+}
+
+/// The Gauss-Chebyshev rule of the second kind (weight `sqrt(1 - x^2)`):
+/// nodes `cos(k pi / (n + 1))`, weights `pi / (n + 1) sin^2(k pi / (n +
+/// 1))`, closed form. Throws for `n = 0`. SciPy: `roots_chebyu`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_chebyu(1);
+/// assert(x[0] == 0.0 && (w[0] - 3.141592653589793 / 2.0).abs() < 4e-16);
+/// ```
+pub fn roots_chebyu(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_chebyu", n);
+    let x: List<f64> = List::with_capacity(n);
+    let w: List<f64> = List::with_capacity(n);
+    let nf = n as f64;
+    for i in 0..n {
+        let k = (n - i) as f64;
+        // cos(k pi / (n + 1)) = sin((n + 1 - 2k) pi / (2 (n + 1))).
+        x.push(((nf + 1.0 - 2.0 * k) * PI / (2.0 * (nf + 1.0))).sin());
+        let s = (k * PI / (nf + 1.0)).sin();
+        w.push(PI / (nf + 1.0) * s * s);
+    }
+    (Vector::<f64>::from(x), Vector::<f64>::from(w))
+}
+
+/// The Gauss-Hermite rule for the weight `e^-x^2` on the real line
+/// (physicists' Hermite polynomials; the weights sum to `sqrt(pi)`).
+/// Golub-Welsch, then Newton and the Christoffel weights; nodes within
+/// 4 ulp of mpmath's on the tests, weights within about 1e-14 relative
+/// (those past about `n = 1500` underflow to 0, as their values do).
+/// Throws for `n = 0`. SciPy: `roots_hermite`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_hermite(2);
+/// assert((x[1] - 0.5f64.sqrt()).abs() < 4e-16);
+/// assert((w[0] - 3.141592653589793f64.sqrt() / 2.0).abs() < 4e-16);
+/// ```
+pub fn roots_hermite(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_hermite", n);
+    let a: List<f64> = List::with_capacity(n);
+    let b2: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        a.push(0.0);
+        b2.push(0.5 * k as f64);
+    }
+    try golub_welsch("roots_hermite", a, b2, 0.5 * PI.ln(), true)
+}
+
+/// The Gauss-Hermite rule for the weight `e^(-x^2 / 2)` (probabilists'
+/// Hermite polynomials; the weights sum to `sqrt(2 pi)`). Accuracy as
+/// `roots_hermite`. Throws for `n = 0`. SciPy: `roots_hermitenorm`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_hermitenorm(2);
+/// assert(x[1] == 1.0 && (w[0] - (2.0 * 3.141592653589793).sqrt() / 2.0).abs() < 1e-15);
+/// ```
+pub fn roots_hermitenorm(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_hermitenorm", n);
+    let a: List<f64> = List::with_capacity(n);
+    let b2: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        a.push(0.0);
+        b2.push(k as f64);
+    }
+    try golub_welsch("roots_hermitenorm", a, b2, 0.5 * (2.0 * PI).ln(), true)
+}
+
+/// The generalized Gauss-Laguerre rule for the weight `x^alpha e^-x` on
+/// (0, inf), `alpha > -1` (the weights sum to `Gamma(alpha + 1)`).
+/// Golub-Welsch, then Newton and the Christoffel weights; nodes within
+/// 4 ulp of mpmath's on the tests (10 ulp for the smallest node on a
+/// target without fused multiply-add, as wasm32: the recurrence cancels
+/// there), weights within about 1e-14 relative (the last ones underflow
+/// for large `n`). Throws `InvalidArgument` for `n = 0` or `alpha <= -1`.
+/// SciPy: `roots_genlaguerre`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_genlaguerre(1, 2.0);
+/// // One node at the mean alpha + 1, weight Gamma(3) = 2.
+/// assert(x[0] == 3.0 && (w[0] - 2.0).abs() < 1e-15);
+/// ```
+pub fn roots_genlaguerre(n: usize, alpha: f64) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_genlaguerre", n);
+    try arg(alpha > -1.0, f"roots_genlaguerre: alpha = {alpha}; the weight x^alpha e^-x is integrable only for alpha > -1");
+    let a: List<f64> = List::with_capacity(n);
+    let b2: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        let kf = k as f64;
+        a.push(2.0 * kf + alpha + 1.0);
+        b2.push(kf * (kf + alpha));
+    }
+    try golub_welsch("roots_genlaguerre", a, b2, lgamma(alpha + 1.0), false)
+}
+
+/// The Gauss-Laguerre rule for the weight `e^-x` on (0, inf): the
+/// weights sum to 1. Throws for `n = 0`. SciPy: `roots_laguerre`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_laguerre(2);
+/// assert((x[0] - (2.0 - 2f64.sqrt())).abs() < 4e-16);
+/// assert((w[0] + w[1] - 1.0).abs() < 4e-16);
+/// ```
+pub fn roots_laguerre(n: usize) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_laguerre", n);
+    try roots_genlaguerre(n, 0.0)
+}
+
+/// The Gauss-Jacobi rule for the weight `(1 - x)^alpha (1 + x)^beta` on
+/// (-1, 1), `alpha, beta > -1` (the weights sum to `2^(alpha + beta + 1)
+/// B(alpha + 1, beta + 1)`). Golub-Welsch, then Newton and the
+/// Christoffel weights; nodes within 4 ulp, weights within 1e-14
+/// relative of mpmath on the tests.
+/// Throws `InvalidArgument` for `n = 0` or a parameter `<= -1`. SciPy:
+/// `roots_jacobi`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_jacobi(1, 1.0, 0.0);
+/// // One node at the weight's mean -1/3, weight 2.
+/// assert((x[0] + 1.0 / 3.0).abs() < 4e-16 && (w[0] - 2.0).abs() < 1e-15);
+/// ```
+pub fn roots_jacobi(n: usize, alpha: f64, beta: f64) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_jacobi", n);
+    try arg(alpha > -1.0 && beta > -1.0, f"roots_jacobi: alpha = {alpha}, beta = {beta}; the weight (1 - x)^alpha (1 + x)^beta is integrable only for alpha, beta > -1");
+    let ab = alpha + beta;
+    let a: List<f64> = List::with_capacity(n);
+    let b2: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        let kf = k as f64;
+        let c = 2.0 * kf + ab;
+        a.push(if k == 0 { (beta - alpha) / (ab + 2.0) } else { (beta * beta - alpha * alpha) / (c * (c + 2.0)) });
+        if k == 0 {
+            b2.push(0.0);
+        } else if k == 1 {
+            b2.push(4.0 * (1.0 + alpha) * (1.0 + beta) / ((2.0 + ab) * (2.0 + ab) * (3.0 + ab)));
+        } else {
+            b2.push(4.0 * kf * (kf + alpha) * (kf + beta) * (kf + ab) / (c * c * (c + 1.0) * (c - 1.0)));
+        }
+    }
+    let lmu0 = (ab + 1.0) * 2f64.ln() + lgamma(alpha + 1.0) + lgamma(beta + 1.0) - lgamma(ab + 2.0);
+    try golub_welsch("roots_jacobi", a, b2, lmu0, alpha == beta)
+}
+
+/// The Gauss-Gegenbauer rule for the weight `(1 - x^2)^(alpha - 1/2)` on
+/// (-1, 1), `alpha > -1/2` (the Jacobi rule with both parameters `alpha
+/// - 1/2`; `alpha = 0` is the Chebyshev rule of the first kind).
+/// Throws `InvalidArgument` for `n = 0` or `alpha <= -1/2`. SciPy:
+/// `roots_gegenbauer`.
+///
+/// ```nabi
+/// let (x, w) = try special::roots_gegenbauer(3, 0.5);
+/// let (y, v) = try special::roots_legendre(3);
+/// assert((x[0] - y[0]).abs() < 4e-16 && (w[0] - v[0]).abs() < 4e-16);
+/// ```
+pub fn roots_gegenbauer(n: usize, alpha: f64) throws (SpecialError) -> (Vector<f64>, Vector<f64>) {
+    try need_n("roots_gegenbauer", n);
+    try arg(alpha > -0.5, f"roots_gegenbauer: alpha = {alpha}; the weight (1 - x^2)^(alpha - 1/2) is integrable only for alpha > -1/2");
+    if alpha == 0.0 { return try roots_chebyt(n); }
+    let a: List<f64> = List::with_capacity(n);
+    let b2: List<f64> = List::with_capacity(n);
+    for k in 0..n {
+        let kf = k as f64;
+        a.push(0.0);
+        b2.push(if k == 0 { 0.0 } else { kf * (kf + 2.0 * alpha - 1.0) / (4.0 * (kf + alpha) * (kf + alpha - 1.0)) });
+    }
+    // mu0 = sqrt(pi) Gamma(alpha + 1/2) / Gamma(alpha + 1).
+    let lmu0 = 0.5 * PI.ln() + lgamma(alpha + 0.5) - lgamma(alpha + 1.0);
+    try golub_welsch("roots_gegenbauer", a, b2, lmu0, true)
+}

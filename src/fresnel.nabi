@@ -1,0 +1,80 @@
+// The Fresnel integrals S(x) = int_0^x sin(pi t^2 / 2) dt and C(x) =
+// int_0^x cos(pi t^2 / 2) dt: their power series to 1.5, and past it
+// C + iS = (1 + i) / 2 erf(z), z = sqrt(pi) (1 - i) x / 2 (DLMF 7.5),
+// with erfc z from Laplace's continued fraction (DLMF 7.9.2) summed
+// bottom up. The phase pi x^2 / 2 is reduced with x^2 carried as two
+// doubles, so a large x keeps the accuracy of the small oscillating part.
+
+use pkg::complex::cx;
+use pkg::gammas::{cospi, sinpi};
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `(S(x), C(x))` for x > 1.5. With `z^2 = -i pi x^2 / 2`, Laplace's
+/// fraction divided through by z gives `erfc z = e^(i pi x^2 / 2) / (sqrt(pi)
+/// z t)`, `t = 1 + c1 / (1 + c2 / (1 + ...))`, `c_k = k / (2 z^2) = i k /
+/// (pi x^2)`, here from a depth of 280 / x^2 + 8.
+fn fresnel_cf(x: f64) -> (f64, f64) {
+    let c = 1.0 / (PI * x * x);
+    let k = (280.0 / (x * x)).floor() + 8.0;
+    // t = 1 + i k c / t on its real and imaginary parts.
+    let (tr, ti) = (1.0, 0.0);
+    while k > 0.0 {
+        let q = k * c / (tr * tr + ti * ti);
+        let r = 1.0 + q * ti;
+        ti = q * tr;
+        tr = r;
+        k -= 1.0;
+    }
+    // sqrt(pi) z = pi (1 - i) x / 2.
+    let w = 1.0 / (cx(0.5 * PI * x, -0.5 * PI * x) * cx(tr, ti));
+    // x^2 / 2 mod 2, exactly, plus the low part of x^2.
+    let s = x * x;
+    let l = x.mul_add(x, -s);
+    let ph = (0.5 * s) % 2.0 + 0.5 * l;
+    let cs = cx(0.5, 0.5) * (1.0 - cx(cospi(ph), sinpi(ph)) * w);
+    (cs.im, cs.re)
+}
+
+/// The Fresnel integrals `(S(x), C(x))`, normalized as SciPy and
+/// Abramowitz and Stegun 7.3: `S(x) = int_0^x sin(pi t^2 / 2) dt`,
+/// `C(x) = int_0^x cos(pi t^2 / 2) dt`. Odd in `x`, both 1/2 at infinity.
+/// About 3 ulp (6.2e-16 measured) up to the largest finite `x`. SciPy:
+/// `fresnel`.
+///
+/// ```nabi
+/// let (s, c) = special::fresnel(1.0);
+/// assert((s - 0.43825914739035476).abs() < 4e-16 && (c - 0.7798934003768229).abs() < 4e-16);
+/// assert(special::fresnel(f64::INFINITY) == (0.5, 0.5));
+/// ```
+pub fn fresnel(x: f64) -> (f64, f64) {
+    if x != x { return (x, x); }
+    let a = x.abs();
+    // 1 / (pi x) is below half an ulp of 1/2 past 1e16.
+    let (s, c) = if a > 1e16 {
+        (0.5, 0.5)
+    } else if a > 1.5 {
+        fresnel_cf(a)
+    } else {
+        // x sum (-1)^k t^(2k+1) / ((2k+1)! (4k+3)) and x sum (-1)^k t^(2k) /
+        // ((2k)! (4k+1)), t = pi x^2 / 2.
+        let t = 0.5 * PI * a * a;
+        let p = 1.0;
+        let (s, c) = (0.0, 0.0);
+        let k = 0.0;
+        while k < 60.0 {
+            let q = p * t / (2.0 * k + 1.0);
+            let neg = k % 2.0 == 1.0;
+            let u = q / (4.0 * k + 3.0);
+            let v = p / (4.0 * k + 1.0);
+            s += if neg { -u } else { u };
+            c += if neg { -v } else { v };
+            if v <= 0.25 * EPS * c.abs() && u <= 0.25 * EPS * s.abs() { break; }
+            p = q * t / (2.0 * k + 2.0);
+            k += 1.0;
+        }
+        (a * s, a * c)
+    };
+    if x < 0.0 { (-s, -c) } else { (s, c) }
+}

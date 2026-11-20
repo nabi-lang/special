@@ -1,0 +1,286 @@
+//! The elementary functions of a complex argument that core's
+//! `Complex` leaves out: trigonometric, hyperbolic and their inverses,
+//! `log10`, `log2`, `cbrt`, `expm1`, `ln1p`, and `is_close`. Branch cuts
+//! and signed zeros follow C99 Annex G (and Python's `cmath`); the
+//! inverse sine and cosine are Hull, Fairgrieve and Tang's algorithm
+//! (1997), `tanh` is Kahan's (1987), so results stay accurate near the
+//! cuts, for tiny and for huge arguments.
+
+use core::num::Complex;
+
+const PI: f64 = 3.141592653589793;
+const PI_2: f64 = 1.5707963267948966;
+const LN2: f64 = 0.6931471805599453;
+const LN10: f64 = 2.302585092994046;
+// Above this |z|, z^2 + 1 is z^2 to the last bit and squares may
+// overflow: the asymptotic forms take over.
+const BIG: f64 = 1e150;
+// Below this, y^2 underflows next to 1.
+const TINY: f64 = 1e-150;
+// Hull, Fairgrieve and Tang's crossover points.
+const A_CROSS: f64 = 1.5;
+const B_CROSS: f64 = 0.6417;
+
+/// Elementary functions on `Complex<f64>` and `Complex<f32>`, as
+/// methods. `f32` values are computed in `f64` and rounded once.
+///
+/// ```nabi
+/// use special::Elementary;
+/// use core::num::Complex;
+///
+/// let z = 1.0 + 2.0i;
+/// assert(z.sin().is_close(3.165778513216168 + 1.959601041421606i));
+/// assert(z.asin().sin().is_close(z));
+/// // The cut of asin runs along the real axis beyond 1; the sign of a
+/// // zero imaginary part picks the side.
+/// assert(Complex::new(2.0, 0.0).asin().im > 0.0 && Complex::new(2.0, -0.0).asin().im < 0.0);
+/// ```
+pub trait Elementary {
+    /// `sin z`.
+    fn sin(self) -> Self;
+    /// `cos z`.
+    fn cos(self) -> Self;
+    /// `tan z`.
+    fn tan(self) -> Self;
+    /// `sinh z`.
+    fn sinh(self) -> Self;
+    /// `cosh z`.
+    fn cosh(self) -> Self;
+    /// `tanh z`, without overflow for large `|re|`.
+    fn tanh(self) -> Self;
+    /// The principal `asin z`; cuts along the real axis outside
+    /// `[-1, 1]`.
+    fn asin(self) -> Self;
+    /// The principal `acos z`; cuts as `asin`.
+    fn acos(self) -> Self;
+    /// The principal `atan z`; cuts along the imaginary axis outside
+    /// `[-i, i]`.
+    fn atan(self) -> Self;
+    /// The principal `asinh z`; cuts along the imaginary axis outside
+    /// `[-i, i]`.
+    fn asinh(self) -> Self;
+    /// The principal `acosh z` (real part >= 0); cut along the real
+    /// axis left of 1.
+    fn acosh(self) -> Self;
+    /// The principal `atanh z`; cuts along the real axis outside
+    /// `[-1, 1]`.
+    fn atanh(self) -> Self;
+    /// `log10 z` on the principal branch.
+    fn log10(self) -> Self;
+    /// `log2 z` on the principal branch.
+    fn log2(self) -> Self;
+    /// The principal cube root (`|z|^(1/3) e^(i arg(z) / 3)`): `cbrt` of
+    /// `-8` is `1 + 1.732i`, not `-2`.
+    fn cbrt(self) -> Self;
+    /// `e^z - 1`, accurate for small `z`.
+    fn expm1(self) -> Self;
+    /// `ln(1 + z)`, accurate for small `z`.
+    fn ln1p(self) -> Self;
+    /// Whether `|self - other| <= max(rel * max(|self|, |other|), abs)`,
+    /// the rule of `f64::is_close`; `rel` defaults to 1e-9 (f32: 2^-20).
+    fn is_close(self, other: Self, rel: f64 | none = none, abs: f64 = 0.0) -> bool;
+}
+
+fn cx(re: f64, im: f64) -> Complex<f64> { Complex { re, im } }
+
+fn sinh64(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    // Keeps sinh(inf + 0i) = inf + 0i: cosh(x) * sin(0) would be NaN.
+    if y == 0.0 { return cx(x.sinh(), y); }
+    cx(x.sinh() * y.cos(), x.cosh() * y.sin())
+}
+
+fn cosh64(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    if y == 0.0 { return cx(x.cosh(), x.signum() * y); }
+    cx(x.cosh() * y.cos(), x.sinh() * y.sin())
+}
+
+// Kahan, "Branch cuts for complex elementary functions" (1987).
+fn tanh64(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    if x.is_infinite() {
+        let im = if y.is_finite() { 0.0.copysign((2.0 * y).sin()) } else { 0.0.copysign(y) };
+        return cx(x.signum(), im);
+    }
+    if x.abs() > 22.0 {
+        // tanh x is 1 to the last bit; the imaginary part decays as e^-2|x|.
+        let e = (-2.0 * x.abs()).exp();
+        return cx(1.0.copysign(x), 4.0 * y.sin() * y.cos() * e);
+    }
+    let t = y.tan();
+    let b = 1.0 + t * t;
+    let s = x.sinh();
+    let r = (1.0 + s * s).sqrt();
+    let d = 1.0 + b * s * s;
+    cx(b * r * s / d, t / d)
+}
+
+// The real part of asin (or the angle acos needs) and the magnitude of
+// the imaginary part, for x = |re|, y = |im| (Hull, Fairgrieve, Tang).
+// `acos_part` asks for the acos angle in [0, pi/2] instead of asin's.
+fn hft(x: f64, y: f64, acos_part: bool) -> (f64, f64) {
+    if x > BIG || y > BIG || x.is_nan() || y.is_nan() {
+        // asin z ~ -i ln(2iz): angle from atan2, size from ln|z| + ln 2.
+        let re = if acos_part { y.atan2(x) } else { x.atan2(y) };
+        return (re, x.hypot(y).ln() + LN2);
+    }
+    let r = (x + 1.0).hypot(y);
+    let s = (x - 1.0).hypot(y);
+    let a = 0.5 * (r + s);
+    let b = x / a;
+    let yy = y * y;
+    let re = if b <= B_CROSS {
+        if acos_part { b.acos() } else { b.asin() }
+    } else if x <= 1.0 {
+        let d = (0.5 * (a + x) * (yy / (r + x + 1.0) + (s + (1.0 - x)))).sqrt();
+        if acos_part { d.atan2(x) } else { x.atan2(d) }
+    } else {
+        let apx = a + x;
+        let d = y * (0.5 * (apx / (r + x + 1.0) + apx / (s + (x - 1.0)))).sqrt();
+        if acos_part { d.atan2(x) } else { x.atan2(d) }
+    };
+    let im = if a <= A_CROSS {
+        if x < 1.0 && y < TINY {
+            // y^2 underflowed: asin(x + iy) ~ asin x + i y / sqrt(1 - x^2).
+            y / ((1.0 - x) * (1.0 + x)).sqrt()
+        } else {
+            let am1 = if x < 1.0 {
+                0.5 * (yy / (r + (x + 1.0)) + yy / (s + (1.0 - x)))
+            } else {
+                0.5 * (yy / (r + (x + 1.0)) + (s + (x - 1.0)))
+            };
+            (am1 + (am1 * (a + 1.0)).sqrt()).ln_1p()
+        }
+    } else {
+        (a + (a * a - 1.0).sqrt()).ln()
+    };
+    (re, im)
+}
+
+fn asin64(z: Complex<f64>) -> Complex<f64> {
+    let (re, im) = hft(z.re.abs(), z.im.abs(), false);
+    cx(re.copysign(z.re), im.copysign(z.im))
+}
+
+fn acos64(z: Complex<f64>) -> Complex<f64> {
+    let (t, im) = hft(z.re.abs(), z.im.abs(), true);
+    let re = if z.re.is_sign_negative() { PI - t } else { t };
+    cx(re, -im.copysign(z.im))
+}
+
+fn atanh64(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    let (ax, ay) = (x.abs(), y.abs());
+    if x.is_nan() || y.is_nan() {
+        if y.is_infinite() { return cx(0.0.copysign(x), PI_2.copysign(y)); }
+        return cx(f64::NAN, f64::NAN);
+    }
+    if ax > BIG || ay > BIG {
+        // atanh z ~ 1/z + i pi/2 sign(im).
+        let h = ax.hypot(ay);
+        return cx(((x / h) / h).copysign(x), PI_2.copysign(y));
+    }
+    let re = if ax == 1.0 && ay < TINY {
+        // (1 - |x|)^2 + y^2 underflows: atanh(1 + iy) = ln(2 / y) / 2.
+        if ay == 0.0 { f64::INFINITY } else { 0.5 * (LN2 - ay.ln()) }
+    } else {
+        let d = (1.0 - ax) * (1.0 - ax) + ay * ay;
+        0.25 * (4.0 * ax / d).ln_1p()
+    };
+    let im = 0.5 * (2.0 * y).atan2((1.0 - ax) * (1.0 + ax) - ay * ay);
+    cx(re.copysign(x), im)
+}
+
+// -i f(iz) and its kin: iz = (-y, x), and -i (a + ib) = b - ia.
+fn rot(z: Complex<f64>) -> Complex<f64> { cx(-z.im, z.re) }
+
+fn unrot(w: Complex<f64>) -> Complex<f64> { cx(w.im, -w.re) }
+
+fn acosh64(z: Complex<f64>) -> Complex<f64> {
+    let w = acos64(z);
+    if z.im.is_sign_negative() { cx(w.im, -w.re) } else { cx(-w.im, w.re) }
+}
+
+fn cbrt64(z: Complex<f64>) -> Complex<f64> {
+    if z.re == 0.0 && z.im == 0.0 { return z; }
+    Complex::from_polar(z.abs().cbrt(), z.arg() / 3.0)
+}
+
+fn expm164(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    // e^x cos y - 1 = expm1(x) cos y - 2 sin^2(y / 2).
+    let h = (0.5 * y).sin();
+    cx(x.exp_m1() * y.cos() - 2.0 * h * h, if y == 0.0 { y } else { x.exp() * y.sin() })
+}
+
+fn ln1p64(z: Complex<f64>) -> Complex<f64> {
+    let (x, y) = (z.re, z.im);
+    if z.abs() > 0.5 { return cx(1.0 + x, y).ln(); }
+    // |1 + z|^2 - 1 = x (2 + x) + y^2, without the cancellation.
+    cx(0.5 * (x * (2.0 + x) + y * y).ln_1p(), y.atan2(1.0 + x))
+}
+
+fn close64(a: Complex<f64>, b: Complex<f64>, rel: f64, abs: f64) -> bool {
+    if a == b { return true; }
+    if a.is_nan() || b.is_nan() { return false; }
+    let d = (a - b).abs();
+    if !d.is_finite() { return false; }
+    d <= rel * a.abs().max(b.abs()) || d <= abs
+}
+
+impl Elementary for Complex<f64> {
+    fn sin(self) -> Complex<f64> { unrot(sinh64(rot(self))) }
+    fn cos(self) -> Complex<f64> { cosh64(rot(self)) }
+    fn tan(self) -> Complex<f64> { unrot(tanh64(rot(self))) }
+    fn sinh(self) -> Complex<f64> { sinh64(self) }
+    fn cosh(self) -> Complex<f64> { cosh64(self) }
+    fn tanh(self) -> Complex<f64> { tanh64(self) }
+    fn asin(self) -> Complex<f64> { asin64(self) }
+    fn acos(self) -> Complex<f64> { acos64(self) }
+    fn atan(self) -> Complex<f64> { unrot(atanh64(rot(self))) }
+    fn asinh(self) -> Complex<f64> { unrot(asin64(rot(self))) }
+    fn acosh(self) -> Complex<f64> { acosh64(self) }
+    fn atanh(self) -> Complex<f64> { atanh64(self) }
+    fn log10(self) -> Complex<f64> {
+        let l = self.ln();
+        cx(l.re / LN10, l.im / LN10)
+    }
+    fn log2(self) -> Complex<f64> {
+        let l = self.ln();
+        cx(l.re / LN2, l.im / LN2)
+    }
+    fn cbrt(self) -> Complex<f64> { cbrt64(self) }
+    fn expm1(self) -> Complex<f64> { expm164(self) }
+    fn ln1p(self) -> Complex<f64> { ln1p64(self) }
+    fn is_close(self, other: Complex<f64>, rel: f64 | none = none, abs: f64 = 0.0) -> bool {
+        close64(self, other, rel ?? 1e-9, abs)
+    }
+}
+
+fn wide(z: Complex<f32>) -> Complex<f64> { cx(z.re as f64, z.im as f64) }
+
+fn narrow(z: Complex<f64>) -> Complex<f32> { Complex { re: z.re as f32, im: z.im as f32 } }
+
+impl Elementary for Complex<f32> {
+    fn sin(self) -> Complex<f32> { narrow(wide(self).sin()) }
+    fn cos(self) -> Complex<f32> { narrow(wide(self).cos()) }
+    fn tan(self) -> Complex<f32> { narrow(wide(self).tan()) }
+    fn sinh(self) -> Complex<f32> { narrow(sinh64(wide(self))) }
+    fn cosh(self) -> Complex<f32> { narrow(cosh64(wide(self))) }
+    fn tanh(self) -> Complex<f32> { narrow(tanh64(wide(self))) }
+    fn asin(self) -> Complex<f32> { narrow(asin64(wide(self))) }
+    fn acos(self) -> Complex<f32> { narrow(acos64(wide(self))) }
+    fn atan(self) -> Complex<f32> { narrow(wide(self).atan()) }
+    fn asinh(self) -> Complex<f32> { narrow(wide(self).asinh()) }
+    fn acosh(self) -> Complex<f32> { narrow(acosh64(wide(self))) }
+    fn atanh(self) -> Complex<f32> { narrow(atanh64(wide(self))) }
+    fn log10(self) -> Complex<f32> { narrow(wide(self).log10()) }
+    fn log2(self) -> Complex<f32> { narrow(wide(self).log2()) }
+    fn cbrt(self) -> Complex<f32> { narrow(cbrt64(wide(self))) }
+    fn expm1(self) -> Complex<f32> { narrow(expm164(wide(self))) }
+    fn ln1p(self) -> Complex<f32> { narrow(ln1p64(wide(self))) }
+    fn is_close(self, other: Complex<f32>, rel: f64 | none = none, abs: f64 = 0.0) -> bool {
+        close64(wide(self), wide(other), rel ?? 9.5367431640625e-7, abs)
+    }
+}

@@ -1,0 +1,152 @@
+// The Struve functions H_v and L_v for real order v > -3/2.
+//
+// The power series of DLMF 11.2.1 / 11.2.2 summed in double-double
+// arithmetic (the term ratios built exactly, Dekker's products), so H's
+// cancellation, about e^x / x at large x, costs nothing below x = 40;
+// past it, when its terms fall below the rounding, the large-x
+// expansion of DLMF 11.6.1 / 11.6.2 on top of Y_v (I_-v for L), which
+// is the method of SciPy's struve and modstruve.
+
+use pkg::bessel::real::{integral, iv, yv};
+use pkg::gammas::{gamma, lgamma};
+
+const PI: f64 = 3.141592653589793;
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `a + b` as an exact pair.
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+fn dd_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let p = a.0 * b.0;
+    let e = a.0.mul_add(b.0, -p) + (a.0 * b.1 + a.1 * b.0);
+    let s = p + e;
+    (s, e - (s - p))
+}
+
+fn dd_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let q1 = a.0 / b.0;
+    let r = dd_mul((q1, 0.0), b);
+    let (d, de) = two_sum(a.0, -r.0);
+    let q2 = (d + (de + a.1 - r.1)) / b.0;
+    let s = q1 + q2;
+    (s, q2 - (s - q1))
+}
+
+fn dd_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (s, e) = two_sum(a.0, b.0);
+    let e2 = e + a.1 + b.1;
+    let t = s + e2;
+    (t, e2 - (t - s))
+}
+
+/// `(z/2)^(v+1) / (Gamma(3/2) Gamma(v + 3/2)) sum_k (s z^2/4)^k /
+/// ((3/2)_k (v + 3/2)_k)`, the series of H (`s = -1`) and L (`s = 1`).
+fn series(v: f64, x: f64, s: f64) -> f64 {
+    let z = 0.5 * x;
+    let a = v + 1.5;
+    let pre = if a < 170.0 {
+        z.pow(v + 1.0) / (0.886226925452758 * gamma(a))
+    } else {
+        ((v + 1.0) * z.ln() - lgamma(a) - 0.12078223763524522).exp()
+    };
+    if pre == 0.0 || !pre.is_finite() { return pre; }
+    let zh = z * z;
+    let q = (s * zh, s * z.mul_add(z, -zh));
+    let t = (1.0, 0.0);
+    let sum = (1.0, 0.0);
+    let k = 0.0;
+    while k < 2000.0 {
+        let b = two_sum(a, k);
+        let d = dd_mul((k + 1.5, 0.0), b);
+        t = dd_div(dd_mul(t, q), d);
+        sum = dd_add(sum, t);
+        if t.0.abs() <= 0.125 * EPS * sum.0.abs() { break; }
+        k += 1.0;
+    }
+    pre * (sum.0 + sum.1)
+}
+
+/// `sum_k Gamma(k + 1/2) (x/2)^(v - 2k - 1) / Gamma(v + 1/2 - k)` with
+/// the sign `s^k` (H: `s = 1`, L: `s = -1`), divided by pi; `none` when
+/// the terms grow before they fall below the rounding of the sum plus
+/// `base`, the Bessel term it is added to.
+fn large(v: f64, x: f64, s: f64, base: f64) -> f64 | none {
+    let z = 0.5 * x;
+    let g = gamma(v + 0.5);
+    // 1 / Gamma(v + 1/2 - k) is 0 for every k at a pole.
+    if g.is_infinite() || g != g { return 0.0; }
+    let t = 1.7724538509055160 * z.pow(v - 1.0) / g;
+    let sum = t;
+    let prev = t.abs();
+    let k = 0.0;
+    while k < 200.0 {
+        t *= s * (k + 0.5) * (v - 0.5 - k) / (z * z);
+        sum += t;
+        if t.abs() <= 0.125 * EPS * (sum.abs() + PI * base) { return sum / PI; }
+        if t.abs() > prev { return none; }
+        prev = t.abs();
+        k += 1.0;
+    }
+    none
+}
+
+/// `f(-x) = (-1)^(v+1) f(x)` for integer `v`; NaN for other `v`.
+fn odd_part(v: f64, r: f64) -> f64 {
+    if !integral(v) { return f64::NAN; }
+    if (v as i64) % 2 == 0 { -r } else { r }
+}
+
+/// The value at 0: 0 for `v > -1`, `2 / pi` at `v = -1`, `inf` between.
+fn at_zero(v: f64) -> f64 {
+    if v > -1.0 { return 0.0; }
+    if v == -1.0 { return 2.0 / PI; }
+    f64::INFINITY
+}
+
+/// The Struve function `H_v(x)` for real `v > -3/2` (NaN otherwise) and
+/// `x >= 0`, or any `x` for integer `v`. About 1e-15 relative off its
+/// zeros (the series in double-double below x = 40; the large-x
+/// expansion on top of `yv` past it). SciPy: `struve`.
+///
+/// ```nabi
+/// assert((special::struve_h(0.0, 1.0) - 0.5686566270482879).abs() < 3e-16);
+/// // H_1/2(x) = sqrt(2 / (pi x)) (1 - cos x).
+/// let x = 30.0;
+/// assert((special::struve_h(0.5, x) - (2.0 / (3.141592653589793 * x)).sqrt() * (1.0 - x.cos())).abs() < 1e-15);
+/// ```
+pub fn struve_h(v: f64, x: f64) -> f64 {
+    if v != v || x != x || !(v > -1.5) { return f64::NAN; }
+    if x < 0.0 { return odd_part(v, struve_h(v, -x)); }
+    if x == 0.0 { return at_zero(v); }
+    if x >= 30.0 {
+        let y = yv(v, x);
+        let r = large(v, x, 1.0, y.abs());
+        if r is f64 { return y + r; }
+    }
+    series(v, x, -1.0)
+}
+
+/// The modified Struve function `L_v(x)` for real `v > -3/2` and `x >=
+/// 0`, or any `x` for integer `v`; `inf` once it overflows (past about
+/// 713). The positive series in double-double below x = 30, `I_-v`
+/// less the large-x expansion past it; about 1e-15 relative. SciPy:
+/// `modstruve`.
+///
+/// ```nabi
+/// assert((special::struve_l(0.0, 1.0) - 0.7102431859378909).abs() < 2e-16);
+/// ```
+pub fn struve_l(v: f64, x: f64) -> f64 {
+    if v != v || x != x || !(v > -1.5) { return f64::NAN; }
+    if x < 0.0 { return odd_part(v, struve_l(v, -x)); }
+    if x == 0.0 { return at_zero(v); }
+    if x >= 30.0 {
+        let i = iv(-v, x);
+        let r = large(v, x, -1.0, i.abs());
+        if r is f64 { return i - r; }
+    }
+    series(v, x, 1.0)
+}

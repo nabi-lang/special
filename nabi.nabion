@@ -1,0 +1,12 @@
+Package {
+    name: "special",
+    version: "0.1.0",
+    nabi_version: "0.1.0",
+    toolchain: "0.1",
+    description: "Special functions on f64 and Complex: gamma, beta, erf, Bessel, Airy, zeta, elliptic, exponential integrals, orthogonal polynomials, combinatorics",
+    license: "MIT OR Apache-2.0",
+    repository: "https://github.com/nabi-lang/special",
+    keywords: ["special-functions", "gamma", "bessel", "zeta", "numerics"],
+    categories: ["mathematics", "science"],
+    deps: {},
+}

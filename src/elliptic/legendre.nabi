@@ -1,0 +1,248 @@
+// Legendre's elliptic integrals in the parameter m = k^2 (SciPy's
+// convention): K and E complete by the arithmetic-geometric mean, E
+// near m = 1 by its logarithmic series in 1 - m (DLMF 19.12.2), the
+// incomplete forms through Carlson's R_F, R_D and R_J after reducing
+// the amplitude to [-pi/2, pi/2] (F(phi + j pi) = 2 j K + F(phi)).
+// m < 0 goes through the imaginary-modulus transformation (DLMF
+// 19.7.5); for m > 1 the complete integrals are complex and give NaN,
+// the incomplete ones are real only while m sin^2 phi <= 1.
+
+use pkg::elliptic::carlson::{rd, rf};
+
+const PI: f64 = 3.141592653589793;
+const PI_LO: f64 = 1.2246467991473532e-16;
+const EPS: f64 = 2.220446049250313e-16;
+
+/// `pi / (2 agm(1, sqrt p))`: K at m = 1 - p, for p >= 0.
+fn k_of(p: f64) -> f64 {
+    if p == 0.0 { return f64::INFINITY; }
+    if p == f64::INFINITY { return 0.0; }
+    let a = 1.0;
+    let b = p.sqrt();
+    for _ in 0..40 {
+        if (a - b).abs() <= 4.0 * EPS * a { break; }
+        let t = 0.5 * (a + b);
+        b = (a * b).sqrt();
+        a = t;
+    }
+    PI / (a + b)
+}
+
+/// E at parameter m in [0, 1] with p = 1 - m given exactly.
+pub(pkg) fn e_of(m: f64, p: f64) -> f64 {
+    if p == 0.0 { return 1.0; }
+    if p < 0.1 {
+        // 1 + 1/2 sum c_n p^(n + 1) (-ln(p) / 2 + d(n) - 1 / ((2n + 1)(2n + 2))),
+        // d(n) = psi(n + 1) - psi(n + 1/2).
+        let l = -0.5 * p.ln();
+        let d = 1.3862943611198906;
+        let c = 1.0;
+        let pk = p;
+        let s = 0.0;
+        let n = 0.0;
+        while n < 200.0 {
+            let t = c * pk * (l + d - 1.0 / ((2.0 * n + 1.0) * (2.0 * n + 2.0)));
+            s += t;
+            if t.abs() <= EPS * 0.25 * s.abs() { break; }
+            c *= (0.5 + n) * (1.5 + n) / ((2.0 + n) * (n + 1.0));
+            d -= 1.0 / ((n + 1.0) * (2.0 * n + 1.0));
+            pk *= p;
+            n += 1.0;
+        }
+        return 1.0 + 0.5 * s;
+    }
+    // E = K (1 - sum 2^(n - 1) c_n^2), c_0^2 = m.
+    let a = 1.0;
+    let b = p.sqrt();
+    let s = 0.5 * m;
+    let w = 0.5;
+    for _ in 0..40 {
+        if (a - b).abs() <= 4.0 * EPS * a { break; }
+        let c = 0.5 * (a - b);
+        w *= 2.0;
+        s += w * c * c;
+        let t = 0.5 * (a + b);
+        b = (a * b).sqrt();
+        a = t;
+    }
+    PI / (a + b) * (1.0 - s)
+}
+
+/// The complete elliptic integral of the first kind `K(m) =
+/// integral_0^(pi/2) dt / sqrt(1 - m sin^2 t)`, `m <= 1` (NaN above,
+/// `inf` at 1). By the arithmetic-geometric mean, `K = pi / (2 agm(1,
+/// sqrt(1 - m)))`; within 2 ulp of mpmath on the tests, `m` from -1e10
+/// to 1 - 1e-16. Near `m = 1` pass `1 - m` to `ellipkm1` instead, which
+/// keeps the digits `1 - m` rounds away. SciPy: `ellipk`.
+///
+/// ```nabi
+/// assert((special::ellipk(0.0) - 1.5707963267948966).abs() < 4e-16);
+/// assert((special::ellipk(0.5) - 1.8540746773013719).abs() < 1e-15);
+/// assert(special::ellipk(1.0) == f64::INFINITY);
+/// ```
+pub fn ellipk(m: f64) -> f64 {
+    if m != m || m > 1.0 { return f64::NAN; }
+    k_of(1.0 - m)
+}
+
+/// `K(1 - p)`, the complete integral of the first kind as a function
+/// of the complementary parameter `p = 1 - m >= 0` (NaN below, `inf`
+/// at 0): full relative accuracy for tiny `p`, where `K` grows like
+/// `ln(4 / sqrt p)`. Within 2 ulp. SciPy: `ellipkm1`.
+///
+/// ```nabi
+/// assert((special::ellipkm1(1e-20) - 24.41214529106035).abs() < 4e-14);
+/// ```
+pub fn ellipkm1(p: f64) -> f64 {
+    if !(p >= 0.0) { return f64::NAN; }
+    k_of(p)
+}
+
+/// The complete elliptic integral of the second kind `E(m) =
+/// integral_0^(pi/2) sqrt(1 - m sin^2 t) dt`, `m <= 1` (NaN above).
+/// The arithmetic-geometric mean with the sum of squares (A&S 17.6),
+/// its logarithmic series in `1 - m` below `1 - m = 0.1` where that sum
+/// cancels, and `E(m) = sqrt(1 - m) E(m / (m - 1))` for `m < 0`. Within
+/// 3 ulp of mpmath on the tests. SciPy: `ellipe`.
+///
+/// ```nabi
+/// assert(special::ellipe(1.0) == 1.0);
+/// assert((special::ellipe(0.5) - 1.3506438810476755).abs() < 1e-15);
+/// assert((special::ellipe(-1.0) - 1.9100988945138560).abs() < 1e-15);
+/// ```
+pub fn ellipe(m: f64) -> f64 {
+    if m != m || m > 1.0 { return f64::NAN; }
+    if m == f64::NEG_INFINITY { return f64::INFINITY; }
+    if m < 0.0 {
+        let p = 1.0 / (1.0 - m);
+        return (1.0 - m).sqrt() * e_of(1.0 - p, p);
+    }
+    e_of(m, 1.0 - m)
+}
+
+/// `phi` as `j pi + r` with `|r| <= pi/2`.
+fn reduce(phi: f64) -> (f64, f64) {
+    if phi.abs() <= 0.5 * PI { return (0.0, phi); }
+    let j = (phi / PI).round();
+    (j, (phi - j * PI) - j * PI_LO)
+}
+
+/// The incomplete elliptic integral of the first kind `F(phi | m) =
+/// integral_0^phi dt / sqrt(1 - m sin^2 t)` for any real amplitude
+/// (`F(phi + j pi) = 2 j K(m) + F(phi)`) and `m <= 1`; for `m > 1`
+/// while `m sin^2 phi <= 1` (NaN past it). `sin(phi) R_F(cos^2 phi, 1 -
+/// m sin^2 phi, 1)` with `1 - m sin^2 phi` formed as `cos^2 + (1 - m)
+/// sin^2`, so `m` near 1 and `phi` near `pi/2` keep their digits.
+/// Within 4 ulp of mpmath on the tests (plus the rounding of `phi`
+/// reduced by `pi` for large amplitudes). SciPy: `ellipkinc`.
+///
+/// ```nabi
+/// assert(special::ellipkinc(0.7, 0.0) == 0.7);
+/// assert((special::ellipkinc(1.0, 0.5) - 1.0832167728451688).abs() < 1e-15);
+/// // A full half-period gives 2 K.
+/// assert((special::ellipkinc(3.141592653589793, 0.5) - 2.0 * special::ellipk(0.5)).abs() < 1e-15);
+/// ```
+pub fn ellipkinc(phi: f64, m: f64) -> f64 {
+    if phi != phi || m != m { return f64::NAN; }
+    if m == 0.0 { return phi; }
+    if phi.is_infinite() { return if m <= 1.0 { phi } else { f64::NAN }; }
+    let (j, r) = reduce(phi);
+    let s = r.sin();
+    let c = r.cos();
+    let d2 = c * c + (1.0 - m) * s * s;
+    if m > 1.0 && (j != 0.0 || d2 < 0.0) { return f64::NAN; }
+    let f = if s == 0.0 { r } else { s * rf(c * c, d2, 1.0) };
+    if j == 0.0 { return f; }
+    if m == 1.0 { return if phi > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }; }
+    2.0 * j * ellipk(m) + f
+}
+
+/// The incomplete elliptic integral of the second kind `E(phi | m) =
+/// integral_0^phi sqrt(1 - m sin^2 t) dt`, for any real amplitude
+/// (`E(phi + j pi) = 2 j E(m) + E(phi)`) and `m <= 1`; for `m > 1`
+/// while `m sin^2 phi <= 1`. For `0 < m < 1` through DLMF 19.25.10,
+/// whose three terms are all of one sign (`(1 - m) s R_F + m (1 - m)
+/// s^3 R_D / 3 + m s c / Delta`), else through 19.25.9. Within 4 ulp of
+/// mpmath on the tests. SciPy: `ellipeinc`.
+///
+/// ```nabi
+/// assert((special::ellipeinc(1.0, 0.5) - 0.9273298836244401).abs() < 1e-15);
+/// assert((special::ellipeinc(1.2, 1.0) - 1.2f64.sin()).abs() < 4e-16);
+/// ```
+pub fn ellipeinc(phi: f64, m: f64) -> f64 {
+    if phi != phi || m != m { return f64::NAN; }
+    if m == 0.0 { return phi; }
+    if phi.is_infinite() { return if m <= 1.0 { phi } else { f64::NAN }; }
+    let (j, r) = reduce(phi);
+    let s = r.sin();
+    let c = r.cos();
+    let p = 1.0 - m;
+    let d2 = c * c + p * s * s;
+    if m > 1.0 && (j != 0.0 || d2 < 0.0) { return f64::NAN; }
+    let e = if s == 0.0 {
+        r
+    } else if m == 1.0 {
+        s
+    } else if m > 0.0 && m < 1.0 {
+        let s3 = s * s * s;
+        p * s * rf(c * c, d2, 1.0) + m * p / 3.0 * s3 * rd(c * c, 1.0, d2) + m * s * c / d2.sqrt()
+    } else {
+        s * rf(c * c, d2, 1.0) - m / 3.0 * s * s * s * rd(c * c, d2, 1.0)
+    };
+    if j == 0.0 { return e; }
+    2.0 * j * ellipe(m) + e
+}
+
+/// The complete elliptic integral of the third kind `Pi(n | m) =
+/// integral_0^(pi/2) dt / ((1 - n sin^2 t) sqrt(1 - m sin^2 t))`, `m <=
+/// 1`, `n != 1` (`inf` at `n = 1`); the Cauchy principal value for `n >
+/// 1`. `R_F(0, 1 - m, 1) + n R_J(0, 1 - m, 1, 1 - n) / 3` (DLMF
+/// 19.25.2). The sign convention is mpmath's and Boost's (`1 - n sin^2`).
+/// Within 14 ulp of mpmath on the tests, the principal values within
+/// 2e-14. SciPy has no `ellippi`.
+///
+/// ```nabi
+/// assert((special::ellippi(0.0, 0.5) - special::ellipk(0.5)).abs() < 1e-15);
+/// assert((special::ellippi(0.3, 0.5) - 2.2503768219439467).abs() < 1e-15);
+/// ```
+pub fn ellippi(n: f64, m: f64) -> f64 {
+    if n != n || m != m || m > 1.0 { return f64::NAN; }
+    if n == 1.0 || m == 1.0 { return f64::INFINITY; }
+    if n == 0.0 { return ellipk(m); }
+    let p = 1.0 - m;
+    rf(0.0, p, 1.0) + n / 3.0 * pkg::elliprj(0.0, p, 1.0, 1.0 - n)
+}
+
+/// The incomplete elliptic integral of the third kind `Pi(n; phi | m) =
+/// integral_0^phi dt / ((1 - n sin^2 t) sqrt(1 - m sin^2 t))`, for any
+/// real amplitude when `m <= 1` (`Pi(n; phi + j pi | m) = 2 j Pi(n | m) +
+/// Pi(n; phi | m)`), the principal value past the pole `n sin^2 t = 1`.
+/// `s R_F(c^2, Delta^2, 1) + n s^3 R_J(c^2, Delta^2, 1, 1 - n s^2) / 3`
+/// (DLMF 19.25.14). Within 14 ulp of mpmath on the tests away from the
+/// pole. mpmath: `ellippi(n, phi, m)`.
+///
+/// ```nabi
+/// assert((special::ellippiinc(0.3, 1.2, 0.5) - 1.5303674742027079).abs() < 1e-15);
+/// assert(special::ellippiinc(0.0, 1.0, 0.5) == special::ellipkinc(1.0, 0.5));
+/// ```
+pub fn ellippiinc(n: f64, phi: f64, m: f64) -> f64 {
+    if n != n || phi != phi || m != m { return f64::NAN; }
+    if n == 0.0 { return ellipkinc(phi, m); }
+    if phi.is_infinite() { return if m <= 1.0 && n < 1.0 { phi } else { f64::NAN }; }
+    let (j, r) = reduce(phi);
+    let s = r.sin();
+    let c = r.cos();
+    let d2 = c * c + (1.0 - m) * s * s;
+    if m > 1.0 && (j != 0.0 || d2 < 0.0) { return f64::NAN; }
+    let s2 = s * s;
+    let q = 1.0 - n * s2;
+    let v = if s == 0.0 {
+        r
+    } else if q == 0.0 {
+        if s > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }
+    } else {
+        s * rf(c * c, d2, 1.0) + n / 3.0 * s * s2 * pkg::elliprj(c * c, d2, 1.0, q)
+    };
+    if j == 0.0 { return v; }
+    2.0 * j * ellippi(n, m) + v
+}

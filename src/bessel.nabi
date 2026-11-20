@@ -1,0 +1,29 @@
+// Bessel functions of real order and real argument: J, Y, I, K, their
+// exponentially scaled forms, the Hankel functions and the spherical
+// Bessel functions. Complex arguments are not covered.
+
+pub(pkg) mod hankel;
+pub(pkg) mod integer;
+pub(pkg) mod real;
+pub(pkg) mod spherical;
+
+pub use hankel::{hankel1, hankel1e, hankel2, hankel2e};
+pub use integer::{i0, i0e, i1, i1e, j0, j1, jn, k0, k0e, k1, k1e, kn, y0, y1, yn};
+pub use real::{iv, ive, jv, jve, kv, kve, yv, yve};
+pub use spherical::{spherical_in, spherical_jn, spherical_kn, spherical_yn};
+
+/// The Chebyshev sum `c[0] + sum c[k] T_k(u)` (Clenshaw), with `u` the
+/// image of `x` in [lo, hi] on [-1, 1].
+pub(pkg) fn cheb<const N: usize>(c: [f64; N], lo: f64, hi: f64, x: f64) -> f64 {
+    let u = (2.0 * x - lo - hi) / (hi - lo);
+    let u2 = 2.0 * u;
+    let (b1, b2) = (0.0, 0.0);
+    let k = N - 1;
+    while k > 0 {
+        let t = u2 * b1 - b2 + c[k];
+        b2 = b1;
+        b1 = t;
+        k -= 1;
+    }
+    u * b1 - b2 + c[0]
+}
