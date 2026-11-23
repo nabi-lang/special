@@ -131,7 +131,7 @@ integrals, complex Lambert W, Legendre functions of the second kind.
 
 ## Docs
 
-https://packages.nabi-lang.org/packages/special/latest/docs
+https://docs.nabi-lang.org/packages/special/latest
 
 ## License
 
